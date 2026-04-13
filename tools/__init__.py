@@ -1,1 +1,1 @@
-"""Paquete de herramientas MCP."""
+"""MCP tools package."""

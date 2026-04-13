@@ -1,4 +1,4 @@
-"""Functional tests del endpoint /health."""
+"""Functional tests for /health endpoint."""
 
 from fastapi.testclient import TestClient
 

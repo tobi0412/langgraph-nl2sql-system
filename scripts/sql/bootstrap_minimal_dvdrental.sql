@@ -1,5 +1,5 @@
--- Bootstrap minimo para entorno local de Iteracion 1.
--- Nota: este script NO reemplaza el dataset oficial completo.
+-- Minimal bootstrap for local Iteration 1 environment.
+-- Note: this script does NOT replace the full official dataset.
 
 CREATE TABLE IF NOT EXISTS actor (
     actor_id SERIAL PRIMARY KEY,

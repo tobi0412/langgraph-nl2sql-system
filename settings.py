@@ -1,11 +1,11 @@
-"""Configuracion centralizada del proyecto."""
+"""Centralized project settings."""
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Settings de aplicacion y servicios."""
+    """Application and service settings."""
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,1 +1,1 @@
-"""Paquete de memorias."""
+"""Memory package."""

@@ -1,1 +1,1 @@
-"""Paquete de agentes."""
+"""Agents package."""

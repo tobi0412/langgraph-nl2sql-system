@@ -1,4 +1,4 @@
-"""Integration tests de conectividad y tablas clave en PostgreSQL."""
+"""Integration tests for PostgreSQL connectivity and key tables."""
 
 import psycopg
 import pytest
@@ -10,7 +10,7 @@ def _require_db() -> None:
     try:
         check_database_connection()
     except psycopg.OperationalError as exc:
-        pytest.skip(f"DB no disponible para integration tests: {exc}")
+        pytest.skip(f"DB unavailable for integration tests: {exc}")
 
 
 def test_in_db_connection_success():

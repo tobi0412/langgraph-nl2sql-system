@@ -1,1 +1,1 @@
-"""Paquete de grafo/orquestacion."""
+"""Graph/orchestration package."""

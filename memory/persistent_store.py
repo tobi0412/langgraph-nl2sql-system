@@ -1,8 +1,8 @@
-"""Memoria persistente (iteracion 1: estructura base)."""
+"""Persistent memory (iteration 1: base structure)."""
 
 
 class PersistentStore:
-    """Store persistente para preferencias de usuario."""
+    """Persistent store for user preferences."""
 
     def __init__(self) -> None:
         self._store: dict[str, dict[str, str]] = {}

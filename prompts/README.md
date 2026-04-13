@@ -1,9 +1,9 @@
 # Prompts
 
-Este directorio contiene prompts versionados para:
+This directory contains versioned prompts for:
 
 - `schema_agent`
 - `query_agent`
-- validadores y rutas de workflow
+- validators and workflow routes
 
-Se completan en iteraciones siguientes.
+These will be completed in later iterations.

@@ -1,10 +1,10 @@
 # langgraph-nl2sql-system
 
-Base tecnica de la Iteracion 1 para un sistema NL2SQL multiagente con LangGraph.
+Technical baseline from Iteration 1 for a multi-agent NL2SQL system with LangGraph.
 
-## Estado actual (Iteracion 1)
+## Current Status (Iteration 1)
 
-- Estructura inicial del proyecto creada segun consigna:
+- Initial project structure created according to the assignment:
   - `agents/schema_agent.py`
   - `agents/query_agent.py`
   - `graph/workflow.py`
@@ -14,25 +14,25 @@ Base tecnica de la Iteracion 1 para un sistema NL2SQL multiagente con LangGraph.
   - `tools/mcp_sql_tool.py`
   - `prompts/`
   - `tests/`
-- API minima con `GET /health`.
-- Configuracion centralizada por entorno en `settings.py` y `.env.example`.
-- Conexion PostgreSQL validada desde healthcheck.
-- Dockerizacion base (`Dockerfile`, `docker-compose.yml`, `.dockerignore`).
+- Minimal API with `GET /health`.
+- Centralized environment configuration in `settings.py` and `.env.example`.
+- PostgreSQL connectivity validated from the healthcheck.
+- Base Docker setup (`Dockerfile`, `docker-compose.yml`, `.dockerignore`).
 
-## Configuracion de entorno
+## Environment Configuration
 
-1. Copiar variables:
+1. Copy environment variables:
    - `cp .env.example .env`
-2. Ajustar `DATABASE_URL` si corresponde.
+2. Adjust `DATABASE_URL` if needed.
 
-Variables clave:
+Key variables:
 
 - DB: `DATABASE_URL`, `DB_CONNECT_TIMEOUT`
 - LLM: `LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL`
 - App: `APP_HOST`, `APP_PORT`, `APP_ENV`, `APP_LOG_LEVEL`
 - Flags: `ENABLE_SCHEMA_AGENT`, `ENABLE_QUERY_AGENT`
 
-## Ejecucion local
+## Local Run
 
 ```bash
 pip install -e ".[dev]"
@@ -63,10 +63,10 @@ Healthcheck:
 
 ## Dataset DVD Rental
 
-- Para bootstrap local minimo (iteracion 1), se carga automaticamente un esquema con tablas `film`, `actor` y `rental`.
-- Para usar el dataset oficial completo, seguir `scripts/bootstrap_dvdrental.md`.
+- For minimal local bootstrap (iteration 1), a schema with tables `film`, `actor`, and `rental` is loaded automatically.
+- To use the full official dataset, follow `scripts/bootstrap_dvdrental.md`.
 
-## Tests de iteracion
+## Iteration Tests
 
 ```bash
 pytest tests/test_u_settings.py

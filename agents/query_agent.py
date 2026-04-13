@@ -1,8 +1,8 @@
-"""Query Agent placeholder para iteracion 1."""
+"""Query Agent placeholder for iteration 1."""
 
 
 class QueryAgent:
-    """Agente de consultas NL2SQL (a completar en iteracion 4)."""
+    """NL2SQL query agent (to be completed in iteration 4)."""
 
     def run(self) -> str:
-        return "Query Agent base listo."
+        return "Query Agent base ready."

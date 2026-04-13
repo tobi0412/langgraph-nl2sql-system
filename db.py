@@ -1,4 +1,4 @@
-"""Utilidades de conexion y chequeos de PostgreSQL."""
+"""PostgreSQL connection and validation utilities."""
 
 from collections.abc import Iterable
 
@@ -8,7 +8,7 @@ from settings import settings
 
 
 def check_database_connection() -> bool:
-    """Retorna True si puede ejecutar SELECT 1."""
+    """Return True if SELECT 1 can be executed."""
     with psycopg.connect(settings.database_url, connect_timeout=settings.db_connect_timeout) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT 1;")
@@ -17,7 +17,7 @@ def check_database_connection() -> bool:
 
 
 def get_existing_tables(table_names: Iterable[str]) -> set[str]:
-    """Devuelve el subconjunto de tablas existentes en schema public."""
+    """Return the subset of existing tables in the public schema."""
     tables = list(table_names)
     if not tables:
         return set()

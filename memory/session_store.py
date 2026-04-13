@@ -1,8 +1,8 @@
-"""Memoria de sesion en corto plazo (iteracion 1: base)."""
+"""Short-term session memory (iteration 1: base)."""
 
 
 class SessionStore:
-    """Store de contexto por sesion."""
+    """Session context store."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, str]] = {}

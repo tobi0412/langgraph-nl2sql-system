@@ -1,4 +1,4 @@
-"""Unit tests de settings."""
+"""Unit tests for settings."""
 
 from settings import Settings
 
