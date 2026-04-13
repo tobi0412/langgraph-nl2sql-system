@@ -205,3 +205,24 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Proyecto langgraph-nl2sql-system
+.DS_Store
+Thumbs.db
+
+# Runtime local
+*.pid
+*.out
+*.err
+
+# Base de datos/volumenes locales
+postgres_data/
+chroma_data/
+
+# Archivos de edicion y tooling
+.idea/
+.vscode/
+
+# Artefactos de demos de referencia 
+demos-estudiantes-main/**/__pycache__/
+demos-estudiantes-main/**/*.pyc

@@ -1,0 +1,42 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: langgraph-nl2sql-app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/dvdrental}
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: langgraph-nl2sql-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dvdrental
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/sql/bootstrap_minimal_dvdrental.sql:/docker-entrypoint-initdb.d/001_bootstrap.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dvdrental"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres_data:
