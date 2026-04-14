@@ -32,5 +32,14 @@ class Settings(BaseSettings):
     enable_schema_agent: bool = Field(default=True, alias="ENABLE_SCHEMA_AGENT")
     enable_query_agent: bool = Field(default=True, alias="ENABLE_QUERY_AGENT")
 
+    schema_docs_path: str = Field(
+        default="data/schema_docs.json",
+        alias="SCHEMA_DOCS_PATH",
+    )
+    schema_agent_max_iterations: int = Field(
+        default=15,
+        alias="SCHEMA_AGENT_MAX_ITERATIONS",
+    )
+
 
 settings = Settings()
