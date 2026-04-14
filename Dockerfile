@@ -10,11 +10,12 @@ COPY pyproject.toml README.md ./
 COPY . .
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[dev]"
+    pip install --no-cache-dir -e ".[dev,ui]"
 
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
+EXPOSE 8501
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=20s \
   CMD curl -f http://localhost:8000/health || exit 1
