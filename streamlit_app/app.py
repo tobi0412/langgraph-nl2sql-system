@@ -29,6 +29,7 @@ from observability.langsmith_setup import log_langsmith_status
 
 log_langsmith_status()
 
+from agents.query_agent import QueryAgent
 from agents.schema_agent import SchemaAgentRunner
 from streamlit_app.api_client import health_check
 from streamlit_app.config_ui import get_api_base_url, get_api_timeout
@@ -39,8 +40,10 @@ logger = logging.getLogger(__name__)
 def _init_session_state() -> None:
     defaults: dict[str, Any] = {
         "schema_runner": None,
+        "query_agent": None,
         "schema_pending_hitl": False,
         "schema_last_result": None,
+        "query_last_result": None,
         "schema_session_id": str(uuid.uuid4()),
         "chat_status": [],
     }
@@ -53,6 +56,12 @@ def _get_runner() -> SchemaAgentRunner:
     if st.session_state.schema_runner is None:
         st.session_state.schema_runner = SchemaAgentRunner()
     return st.session_state.schema_runner
+
+
+def _get_query_agent() -> QueryAgent:
+    if st.session_state.query_agent is None:
+        st.session_state.query_agent = QueryAgent()
+    return st.session_state.query_agent
 
 
 def _render_sidebar() -> str:
@@ -100,18 +109,7 @@ def _draft_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def main() -> None:
-    st.set_page_config(
-        page_title="NL2SQL — Schema Agent",
-        page_icon="📊",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-    _init_session_state()
-
-    session_id = _render_sidebar()
-
-    st.title("Documentacion de schema (Human-in-the-loop)")
+def _render_schema_tab(session_id: str) -> None:
     st.markdown(
         "Genera borradores con el **Schema Agent** (LangGraph + `mcp_schema_inspect`), revisa el JSON y "
         "**aprueba**, **edita** o **rechaza** antes de persistir en disco."
@@ -123,6 +121,7 @@ def main() -> None:
             "Instruccion para el agente",
             value="Document the public schema for the DVD rental database.",
             height=100,
+            key="schema_user_message",
         )
         start = st.button("Iniciar documentacion", type="primary", use_container_width=True)
 
@@ -228,6 +227,95 @@ def main() -> None:
             else:
                 st.error(out.get("error", str(out)))
             st.rerun()
+
+
+def _render_query_tab(session_id: str) -> None:
+    st.markdown(
+        "Consulta en lenguaje natural con el **Query Agent**. "
+        "Usa las descripciones aprobadas del Schema Agent y valida antes de ejecutar SQL."
+    )
+    question = st.text_area(
+        "Pregunta en lenguaje natural",
+        value="Cuantos registros hay en film?",
+        height=100,
+        key="query_question",
+    )
+    run_query = st.button("Ejecutar consulta", type="primary", use_container_width=True)
+
+    if run_query:
+        with st.spinner("Ejecutando Query Agent..."):
+            try:
+                st.session_state.query_last_result = _get_query_agent().run(
+                    question,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                logger.exception("query_agent_failed")
+                st.error(f"Error al ejecutar Query Agent: {exc}")
+                return
+
+    result = st.session_state.query_last_result
+    if not result:
+        st.info("Pulsa **Ejecutar consulta** para probar el Query Agent.")
+        return
+
+    status = result.get("status")
+    if status == "ok":
+        st.success("Consulta ejecutada correctamente.")
+    elif status == "blocked_missing_schema":
+        st.warning("Faltan descripciones aprobadas de schema.")
+    else:
+        st.info("Se requiere aclaracion para continuar.")
+
+    st.markdown("#### Estado y explicacion")
+    st.write(f"**Status:** `{status}`")
+    if result.get("explanation"):
+        st.write(result["explanation"])
+
+    if result.get("clarification_question"):
+        st.markdown("#### Aclaracion requerida")
+        st.write(result["clarification_question"])
+
+    if result.get("sql_final"):
+        st.markdown("#### SQL final")
+        st.code(result["sql_final"], language="sql")
+
+    sample = result.get("sample")
+    if isinstance(sample, dict):
+        st.markdown("#### Muestra de resultados")
+        st.write(f"Filas: {sample.get('row_count', 0)}")
+        rows = sample.get("rows") or []
+        columns = sample.get("columns") or []
+        if rows and columns:
+            table_rows = [dict(zip(columns, row)) for row in rows]
+            st.dataframe(table_rows, use_container_width=True)
+        else:
+            st.write("Sin filas para mostrar.")
+
+    limitations = result.get("limitations") or []
+    if limitations:
+        st.markdown("#### Limitaciones")
+        for item in limitations:
+            st.write(f"- {item}")
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="NL2SQL — Schema Agent",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    _init_session_state()
+
+    session_id = _render_sidebar()
+
+    st.title("Documentacion de schema (Human-in-the-loop)")
+    tab_schema, tab_query = st.tabs(["Schema Agent", "Query Agent"])
+    with tab_schema:
+        _render_schema_tab(session_id)
+    with tab_query:
+        _render_query_tab(session_id)
 
 
 if __name__ == "__main__":

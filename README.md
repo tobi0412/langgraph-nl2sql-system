@@ -31,6 +31,14 @@ Technical baseline from Iteration 1 for a multi-agent NL2SQL system with LangGra
 
 Docker Compose loads `.env` into the `app` service so `LLM_*` and `SCHEMA_*` are available in the container.
 
+### Iteration 4/6 — Query Agent + Tabs Architecture
+
+- `QueryAgent` implements single-pass NL2SQL (intent + SQL + validation payload) with read-only execution through `mcp_sql_query`.
+- `Schema Agent` and `Query Agent` run in separate UI tabs and do not hand off directly at runtime.
+- Integration is done through persistent schema descriptions (`SchemaDocsStore`, `SCHEMA_DOCS_PATH`).
+- `QueryAgent` never calls schema inspection tools as fallback.
+- If no approved schema descriptions exist, `QueryAgent` returns `blocked_missing_schema` and asks the user to run `Schema Agent` first.
+
 ### Streamlit (UI simple)
 
 Inspirada en `demos-estudiantes-main/EJ02-ReAct-LangGraph/spec-ui.md`: variables `API_BASE_URL` / `API_TIMEOUT`, healthcheck del API y flujo claro en sidebar + panel principal.
@@ -115,4 +123,6 @@ Healthcheck:
 pytest tests/test_u_settings.py
 pytest tests/test_in_db_connectivity.py
 pytest tests/test_f_health.py
+pytest tests/test_u_query_agent.py
+pytest tests/test_in_query_agent.py
 ```
