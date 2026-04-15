@@ -73,6 +73,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/sql/bootstrap_minimal_dvdrental.sql:/docker-entrypoint-initdb.d/001_bootstrap.sql:ro
+      - ./scripts/sql/readonly_guardrail.sql:/docker-entrypoint-initdb.d/002_readonly_guardrail.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d dvdrental"]
       interval: 5s

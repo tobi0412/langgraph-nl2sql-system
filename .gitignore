@@ -219,10 +219,16 @@ Thumbs.db
 postgres_data/
 chroma_data/
 
+# Schema docs generados (iteration 3)
+data/schema_docs.json
+
 # Archivos de edicion y tooling
 .idea/
 .vscode/
 
-# Artefactos de demos de referencia 
+# Artefactos de demos de referencia
+demos-estudiantes-main/
 demos-estudiantes-main/**/__pycache__/
 demos-estudiantes-main/**/*.pyc
+
+.md
