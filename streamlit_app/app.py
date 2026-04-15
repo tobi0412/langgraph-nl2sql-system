@@ -23,11 +23,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
+
+from observability.langsmith_setup import log_langsmith_status
+
+log_langsmith_status()
+
 from agents.schema_agent import SchemaAgentRunner
 from streamlit_app.api_client import health_check
 from streamlit_app.config_ui import get_api_base_url, get_api_timeout
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

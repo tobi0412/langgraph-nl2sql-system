@@ -41,5 +41,14 @@ class Settings(BaseSettings):
         alias="SCHEMA_AGENT_MAX_ITERATIONS",
     )
 
+    # LangSmith (LangChain/LangGraph tracing — set LANGCHAIN_TRACING_V2=true)
+    langchain_tracing_v2: bool = Field(default=False, alias="LANGCHAIN_TRACING_V2")
+    langchain_api_key: str = Field(default="", alias="LANGCHAIN_API_KEY")
+    langchain_project: str = Field(default="", alias="LANGCHAIN_PROJECT")
+    langchain_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        alias="LANGCHAIN_ENDPOINT",
+    )
+
 
 settings = Settings()

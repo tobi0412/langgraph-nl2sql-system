@@ -13,6 +13,7 @@ from graph.schema_graph import build_schema_graph
 from graph.schema_nodes import create_initial_messages
 from graph.schema_state import SchemaAgentState
 from memory.schema_docs_store import SchemaDocsStore
+from observability.mcp_tracing import run_schema_inspect_for_preload
 from settings import settings
 from tools.mcp_schema_tool import MCPSchemaInspectTool
 
@@ -62,8 +63,16 @@ class SchemaAgentRunner:
     def graph(self):
         return self._graph
 
-    def _config(self, session_id: str) -> dict[str, Any]:
-        return {"configurable": {"thread_id": session_id}}
+    def _config(self, session_id: str, *, run_name: str) -> dict[str, Any]:
+        cfg: dict[str, Any] = {"configurable": {"thread_id": session_id}}
+        if settings.langchain_tracing_v2:
+            cfg["run_name"] = run_name
+            cfg["tags"] = ["schema-agent", "langgraph", "nl2sql-system"]
+            cfg["metadata"] = {
+                "session_id": session_id,
+                "component": "schema-agent",
+            }
+        return cfg
 
     def start(
         self,
@@ -77,7 +86,7 @@ class SchemaAgentRunner:
         has_existing_schema = bool(existing_entries) and not reset_schema
         preloaded_schema_metadata: dict[str, Any] | None = None
         if not has_existing_schema:
-            preloaded_schema_metadata = self.schema_inspect_tool._run()
+            preloaded_schema_metadata = run_schema_inspect_for_preload(self.schema_inspect_tool)
         state = create_initial_schema_state(
             session_id=session_id,
             user_message=user_message,
@@ -85,11 +94,14 @@ class SchemaAgentRunner:
             reset_schema=reset_schema,
             preloaded_schema_metadata=preloaded_schema_metadata,
         )
-        return self._graph.invoke(state, self._config(session_id))
+        return self._graph.invoke(state, self._config(session_id, run_name="schema-agent-start"))
 
     def resume(self, *, session_id: str, human_feedback: dict[str, Any]) -> dict[str, Any]:
         """Resume after interrupt; ``human_feedback`` must include ``action`` (approve/edit/reject)."""
-        return self._graph.invoke(Command(resume=human_feedback), self._config(session_id))
+        return self._graph.invoke(
+            Command(resume=human_feedback),
+            self._config(session_id, run_name="schema-agent-resume"),
+        )
 
 
 def build_schema_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):

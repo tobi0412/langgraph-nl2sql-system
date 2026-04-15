@@ -1,11 +1,18 @@
 """Main API entrypoint."""
 
+import logging
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from db import check_database_connection
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+from observability.langsmith_setup import log_langsmith_status
+
+log_langsmith_status()
 
 app = FastAPI(
     title="langgraph-nl2sql-system",
