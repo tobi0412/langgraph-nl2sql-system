@@ -15,9 +15,11 @@ class SchemaAgentState(TypedDict, total=False):
     iteration: int
     max_iterations: int
     session_id: str
-    user_id: str
     draft_document: dict[str, Any]
     human_feedback: dict[str, Any]
     status: str
     approved_document: dict[str, Any] | None
     error: str | None
+    has_existing_schema: bool
+    reset_schema: bool
+    preloaded_schema_metadata: dict[str, Any] | None

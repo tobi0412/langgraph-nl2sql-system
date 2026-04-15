@@ -4,8 +4,9 @@ import logging
 import uuid
 
 import psycopg
+from psycopg import sql
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from settings import settings
 
@@ -15,7 +16,20 @@ logger = logging.getLogger(__name__)
 class MCPSchemaInspectInput(BaseModel):
     """Input schema for schema inspection."""
 
-    pass
+    table_names: list[str] | None = Field(
+        default=None,
+        description="Optional list of specific public tables to inspect.",
+    )
+    include_samples: bool = Field(
+        default=False,
+        description="Include sample rows in each returned table object.",
+    )
+    sample_rows: int = Field(
+        default=3,
+        ge=3,
+        le=5,
+        description="Number of sample rows per table (3..5).",
+    )
 
 
 class MCPSchemaInspectTool(BaseTool):
@@ -24,24 +38,45 @@ class MCPSchemaInspectTool(BaseTool):
     name: str = "mcp_schema_inspect"
     description: str = (
         "Inspects the database schema and returns available tables, columns, "
-        "PK/FK, and constraints."
+        "PK/FK, constraints, and optional 3..5 sample rows per table."
     )
     args_schema: type[BaseModel] = MCPSchemaInspectInput
 
-    def _run(self) -> dict[str, object]:
+    def _run(
+        self,
+        table_names: list[str] | None = None,
+        include_samples: bool = False,
+        sample_rows: int = 3,
+    ) -> dict[str, object]:
         """Inspect real public schema metadata for agents."""
         call_id = str(uuid.uuid4())
+        selected_tables = [name.strip() for name in (table_names or []) if name and name.strip()]
+        selected_tables = list(dict.fromkeys(selected_tables))
+        include_samples_effective = include_samples or bool(selected_tables)
         logger.info(
             "mcp_tool_call",
-            extra={"tool": "mcp_schema_inspect", "call_id": call_id, "request": {}},
+            extra={
+                "tool": "mcp_schema_inspect",
+                "call_id": call_id,
+                "request": {
+                    "table_names": selected_tables,
+                    "include_samples": include_samples_effective,
+                    "sample_rows": sample_rows,
+                },
+            },
         )
 
         tables_query = """
         SELECT table_name
         FROM information_schema.tables
         WHERE table_schema = 'public'
-        ORDER BY table_name;
         """
+        if selected_tables:
+            tables_query += " AND table_name = ANY(%s)"
+            tables_params: tuple[object, ...] = (selected_tables,)
+        else:
+            tables_params = ()
+        tables_query += " ORDER BY table_name;"
 
         columns_query = """
         SELECT
@@ -52,6 +87,10 @@ class MCPSchemaInspectTool(BaseTool):
             c.column_default
         FROM information_schema.columns c
         WHERE c.table_schema = 'public'
+        """
+        if selected_tables:
+            columns_query += " AND c.table_name = ANY(%s)"
+        columns_query += """
         ORDER BY c.table_name, c.ordinal_position;
         """
 
@@ -64,6 +103,10 @@ class MCPSchemaInspectTool(BaseTool):
           ON tc.constraint_name = kcu.constraint_name
          AND tc.table_schema = kcu.table_schema
         WHERE tc.table_schema = 'public' AND tc.constraint_type = 'PRIMARY KEY'
+        """
+        if selected_tables:
+            pk_query += " AND tc.table_name = ANY(%s)"
+        pk_query += """
         ORDER BY tc.table_name, kcu.ordinal_position;
         """
 
@@ -81,6 +124,10 @@ class MCPSchemaInspectTool(BaseTool):
           ON ccu.constraint_name = tc.constraint_name
          AND ccu.table_schema = tc.table_schema
         WHERE tc.table_schema = 'public' AND tc.constraint_type = 'FOREIGN KEY'
+        """
+        if selected_tables:
+            fk_query += " AND tc.table_name = ANY(%s)"
+        fk_query += """
         ORDER BY tc.table_name, kcu.column_name;
         """
 
@@ -91,24 +138,28 @@ class MCPSchemaInspectTool(BaseTool):
             tc.constraint_type
         FROM information_schema.table_constraints tc
         WHERE tc.table_schema = 'public'
+        """
+        if selected_tables:
+            constraints_query += " AND tc.table_name = ANY(%s)"
+        constraints_query += """
         ORDER BY tc.table_name, tc.constraint_name;
         """
 
         with psycopg.connect(settings.database_url, connect_timeout=settings.db_connect_timeout) as conn:
             with conn.cursor() as cur:
-                cur.execute(tables_query)
+                cur.execute(tables_query, tables_params)
                 table_rows = cur.fetchall()
 
-                cur.execute(columns_query)
+                cur.execute(columns_query, tables_params if selected_tables else ())
                 column_rows = cur.fetchall()
 
-                cur.execute(pk_query)
+                cur.execute(pk_query, tables_params if selected_tables else ())
                 pk_rows = cur.fetchall()
 
-                cur.execute(fk_query)
+                cur.execute(fk_query, tables_params if selected_tables else ())
                 fk_rows = cur.fetchall()
 
-                cur.execute(constraints_query)
+                cur.execute(constraints_query, tables_params if selected_tables else ())
                 constraint_rows = cur.fetchall()
 
         by_table: dict[str, dict[str, object]] = {
@@ -159,11 +210,33 @@ class MCPSchemaInspectTool(BaseTool):
                 {"name": constraint_name, "type": constraint_type}
             )
 
+        if include_samples_effective:
+            with psycopg.connect(settings.database_url, connect_timeout=settings.db_connect_timeout) as conn:
+                with conn.cursor() as cur:
+                    for table_name, payload in by_table.items():
+                        query = sql.SQL("SELECT * FROM {} LIMIT %s").format(
+                            sql.Identifier(table_name)
+                        )
+                        cur.execute(query, (sample_rows,))
+                        sample_rows_data = cur.fetchall()
+                        columns = [desc.name for desc in cur.description] if cur.description else []
+                        payload["sample"] = {
+                            "columns": columns,
+                            "rows": [list(row) for row in sample_rows_data],
+                            "row_count": len(sample_rows_data),
+                            "limit": sample_rows,
+                        }
+
         response = {
             "tool": "mcp_schema_inspect",
             "call_id": call_id,
             "table_count": len(by_table),
             "tables": list(by_table.values()),
+            "filters": {
+                "table_names": selected_tables,
+                "include_samples": include_samples_effective,
+                "sample_rows": sample_rows,
+            },
         }
 
         logger.info(
@@ -172,5 +245,14 @@ class MCPSchemaInspectTool(BaseTool):
         )
         return response
 
-    async def _arun(self) -> dict[str, object]:
-        return self._run()
+    async def _arun(
+        self,
+        table_names: list[str] | None = None,
+        include_samples: bool = False,
+        sample_rows: int = 3,
+    ) -> dict[str, object]:
+        return self._run(
+            table_names=table_names,
+            include_samples=include_samples,
+            sample_rows=sample_rows,
+        )

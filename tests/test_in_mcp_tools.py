@@ -23,6 +23,17 @@ def test_in_mcp_schema_inspect_returns_metadata():
     assert {"film", "actor", "rental"}.issubset(table_names)
 
 
+def test_in_mcp_schema_inspect_supports_multiple_table_samples():
+    _require_tools_db()
+    payload = MCPSchemaInspectTool()._run(table_names=["film", "actor"], sample_rows=3)
+    table_names = {table["table_name"] for table in payload["tables"]}
+    assert table_names == {"film", "actor"}
+    for table in payload["tables"]:
+        assert "sample" in table
+        assert table["sample"]["limit"] == 3
+        assert len(table["sample"]["rows"]) <= 3
+
+
 def test_in_mcp_sql_query_select_returns_rows():
     _require_tools_db()
     payload = MCPSQLQueryTool()._run("SELECT film_id FROM film LIMIT 1;")

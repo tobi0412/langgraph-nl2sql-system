@@ -32,38 +32,42 @@ class SchemaDocsStore:
         data.setdefault("entries", [])
         return data
 
-    def list_approved(self, user_id: str | None = None) -> list[dict[str, Any]]:
+    def list_approved(self) -> list[dict[str, Any]]:
         data = self.load_raw()
         entries: list[dict[str, Any]] = data.get("entries", [])
-        if user_id is None:
-            return list(entries)
-        return [e for e in entries if e.get("user_id") == user_id]
+        return list(entries)
+
+    def latest(self) -> dict[str, Any] | None:
+        """Return latest approved schema entry for single-user mode."""
+        entries = self.list_approved()
+        if not entries:
+            return None
+        return max(entries, key=lambda e: int(e.get("version", 0)))
 
     def save_approved(
         self,
         *,
-        user_id: str,
         session_id: str,
         document: dict[str, Any],
     ) -> dict[str, Any]:
-        """Append an approved snapshot. Returns the stored entry."""
+        """Upsert current approved schema (single-user). Returns stored entry."""
         self._ensure_parent()
         data = self.load_raw()
         entries: list[dict[str, Any]] = data["entries"]
-        version = 1 + max((e.get("version", 0) for e in entries if e.get("user_id") == user_id), default=0)
+        current = self.latest()
+        version = 1 + int(current.get("version", 0)) if current else 1
         entry = {
-            "user_id": user_id,
             "session_id": session_id,
             "version": version,
             "approved_at": datetime.now(tz=UTC).isoformat(),
             "document": document,
         }
-        entries.append(entry)
+        data["entries"] = []
+        data["entries"].append(entry)
         self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info(
             "schema_docs_persisted",
             extra={
-                "user_id": user_id,
                 "session_id": session_id,
                 "version": version,
                 "path": str(self._path),

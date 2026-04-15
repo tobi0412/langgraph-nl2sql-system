@@ -50,7 +50,7 @@ def _get_runner() -> SchemaAgentRunner:
     return st.session_state.schema_runner
 
 
-def _render_sidebar() -> tuple[str, str]:
+def _render_sidebar() -> str:
     st.sidebar.title("Configuracion")
     api_base = st.sidebar.text_input(
         "API_BASE_URL",
@@ -65,7 +65,6 @@ def _render_sidebar() -> tuple[str, str]:
             st.sidebar.error(msg)
 
     st.sidebar.divider()
-    user_id = st.sidebar.text_input("User ID", value="local-user")
     session_id = st.sidebar.text_input("Session ID (thread)", value=st.session_state.schema_session_id)
     if st.sidebar.button("Nueva sesion (nuevo thread)", use_container_width=True):
         st.session_state.schema_session_id = str(uuid.uuid4())
@@ -77,7 +76,7 @@ def _render_sidebar() -> tuple[str, str]:
     st.sidebar.caption(
         "Requiere `DATABASE_URL`, `LLM_*` y opcionalmente `SCHEMA_DOCS_PATH` en el entorno."
     )
-    return user_id, session_id
+    return session_id
 
 
 def _draft_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -105,7 +104,7 @@ def main() -> None:
     )
     _init_session_state()
 
-    user_id, session_id = _render_sidebar()
+    session_id = _render_sidebar()
 
     st.title("Documentacion de schema (Human-in-the-loop)")
     st.markdown(
@@ -124,6 +123,14 @@ def main() -> None:
 
     with col_b:
         st.metric("Estado HITL", "Pendiente" if st.session_state.schema_pending_hitl else "Listo")
+        reset_schema = st.checkbox(
+            "Regenerar schema desde cero",
+            value=False,
+            help=(
+                "Ignora el esquema persistido actual y fuerza modo primera vez "
+                "(precarga metadata completa)."
+            ),
+        )
 
     if start:
         st.session_state.schema_pending_hitl = False
@@ -131,9 +138,9 @@ def main() -> None:
         with st.spinner("Consultando LLM y base de datos (puede tardar)..."):
             try:
                 result = _get_runner().start(
-                    user_id=user_id,
                     session_id=session_id,
                     user_message=user_message,
+                    reset_schema=reset_schema,
                 )
             except Exception as exc:
                 logger.exception("schema_start_failed")
