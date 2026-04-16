@@ -41,6 +41,25 @@ class Settings(BaseSettings):
         alias="SCHEMA_AGENT_MAX_ITERATIONS",
     )
 
+    user_preferences_path: str = Field(
+        default="data/user_preferences.json",
+        alias="USER_PREFERENCES_PATH",
+    )
+    # postgres: tabla en DATABASE_URL (estilo DEMO02 episodic). json: archivo USER_PREFERENCES_PATH.
+    preferences_store_backend: str = Field(default="postgres", alias="PREFERENCES_STORE_BACKEND")
+    session_memory_path: str = Field(
+        default="data/session_memory.json",
+        alias="SESSION_MEMORY_PATH",
+    )
+    session_memory_ttl_seconds: int = Field(
+        default=3600,
+        alias="SESSION_MEMORY_TTL_SECONDS",
+    )
+    working_session_token_limit: int = Field(
+        default=2000,
+        alias="WORKING_SESSION_TOKEN_LIMIT",
+    )
+
     # LangSmith (LangChain/LangGraph tracing — set LANGCHAIN_TRACING_V2=true)
     langchain_tracing_v2: bool = Field(default=False, alias="LANGCHAIN_TRACING_V2")
     langchain_api_key: str = Field(default="", alias="LANGCHAIN_API_KEY")

@@ -17,18 +17,26 @@ class QueryAgentRunner:
     def __post_init__(self) -> None:
         self._graph = build_query_graph()
 
-    def run(self, *, question: str, session_id: str = "default") -> dict[str, Any]:
+    def run(
+        self,
+        *,
+        question: str,
+        session_id: str = "default",
+        user_id: str = "default",
+    ) -> dict[str, Any]:
         """Execute Query Agent LangGraph and normalize response contract."""
         state = self._graph.invoke(
             {
                 "question": (question or "").strip(),
                 "session_id": session_id,
+                "user_id": user_id,
             }
         )
         sql_final = state.get("sql_candidate") or None
         return {
             "status": state.get("status", "needs_clarification"),
             "session_id": session_id,
+            "user_id": user_id,
             "question": question,
             "sql_final": sql_final,
             "sample": state.get("sample"),
@@ -52,11 +60,18 @@ class QueryAgent:
     def __init__(self) -> None:
         self._runner = QueryAgentRunner()
 
-    def run(self, question: str, *, session_id: str = "default") -> dict[str, Any]:
+    def run(
+        self,
+        question: str,
+        *,
+        session_id: str = "default",
+        user_id: str = "default",
+    ) -> dict[str, Any]:
         if not (question or "").strip():
             return {
                 "status": "needs_clarification",
                 "session_id": session_id,
+                "user_id": user_id,
                 "question": question,
                 "sql_final": None,
                 "sample": None,
@@ -72,4 +87,4 @@ class QueryAgent:
                 },
                 "validator": {},
             }
-        return self._runner.run(question=question, session_id=session_id)
+        return self._runner.run(question=question, session_id=session_id, user_id=user_id)

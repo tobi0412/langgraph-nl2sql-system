@@ -1,4 +1,13 @@
-"""LangGraph nodes for Query Agent."""
+"""LangGraph nodes for Query Agent.
+
+Politica de memoria (iteracion 5):
+- prepare: lee PersistentStore (preferencias por user_id) y SessionStore (contexto de sesion);
+  escribe memory_context_text + persistent_prefs.
+- planner / critic: solo lectura del estado (memory_context_text); el planificador usa texto
+  enriquecido para NL2SQL y heuristicas.
+- execute: solo lectura del estado.
+- finalize: escribe SessionStore (ultima pregunta, SQL, filtros, supuestos, aclaraciones).
+"""
 
 from __future__ import annotations
 
@@ -8,15 +17,69 @@ from typing import Any
 
 from graph.query_state import QueryAgentState
 from llm.chat_model import get_chat_model
+from memory.persistent_store import PersistentStore
 from memory.schema_docs_store import SchemaDocsStore
+from memory.session_store import SessionSnapshot, SessionStore
 from prompts.query_agent import QUERY_CRITIC_SYSTEM_PROMPT, QUERY_PLANNER_SQL_SYSTEM_PROMPT
 from settings import settings
 from tools.mcp_sql_tool import MCPSQLQueryTool
 from tools.sql_guard import validate_read_only_sql
 
 
+def _build_memory_context_text(prefs: dict[str, str], snap: SessionSnapshot) -> str:
+    lines: list[str] = [
+        "Preferencias persistentes: "
+        f"idioma={prefs.get('language', 'es')}; "
+        f"formato_respuesta={prefs.get('format', 'markdown')}; "
+        f"fechas={prefs.get('date_preference', 'iso')}; "
+        f"estrictitud={prefs.get('strictness', 'normal')}."
+    ]
+    if snap.working_messages:
+        dial: list[str] = []
+        for m in snap.working_messages[-10:]:
+            role = str(m.get("role", "?"))
+            content = str(m.get("content", ""))[:420]
+            dial.append(f"{role}: {content}")
+        lines.append("Working memory (dialogo reciente, limite por tokens): " + " | ".join(dial))
+    if (
+        snap.last_question
+        or snap.last_sql
+        or snap.recent_filters
+        or snap.assumptions
+        or snap.clarifications
+    ):
+        lines.append(
+            "Memoria de esta sesion (turnos previos): "
+            f"ultima_pregunta={snap.last_question or '(ninguna)'}; "
+            f"ultimo_sql={snap.last_sql or '(ninguno)'}; "
+            f"filtros_recientes={snap.recent_filters}; "
+            f"supuestos={snap.assumptions}; "
+            f"aclaraciones_previas={snap.clarifications[-5:] if snap.clarifications else []}."
+        )
+    return "\n".join(lines)
+
+
+def _assistant_turn_summary(state: QueryAgentState) -> str:
+    """Resumen del turno para escribir en WorkingMemory (estilo DEMO02 assistant)."""
+    status = str(state.get("status") or "")
+    if status == "ok":
+        sql = str(state.get("sql_candidate") or "")[:400]
+        expl = str(state.get("explanation") or "")[:400]
+        return f"SQL: {sql} | {expl}"
+    if status == "needs_clarification":
+        return str(state.get("clarification_question") or "Se requiere aclaracion.")[:500]
+    if status == "blocked_missing_schema":
+        return "Bloqueado: sin descripciones de schema aprobadas."
+    expl = str(state.get("explanation") or "")
+    if expl:
+        return expl[:500]
+    return f"[status={status}]"
+
+
 def prepare_query_node(state: QueryAgentState) -> dict[str, Any]:
     """Load approved schema docs and block if unavailable."""
+    user_id = str(state.get("user_id") or "default")
+    session_id = str(state.get("session_id") or "default")
     store = SchemaDocsStore()
     latest = store.latest()
     doc = latest.get("document") if isinstance(latest, dict) else None
@@ -52,15 +115,30 @@ def prepare_query_node(state: QueryAgentState) -> dict[str, Any]:
             ),
             "validator": {},
             "candidate_tables": [],
+            "user_id": user_id,
+            "persistent_prefs": PersistentStore().get_preferences(user_id),
+            "memory_context_text": "",
         }
-    return {"schema_context": schema_context}
+    persistent = PersistentStore().get_preferences(user_id)
+    snap = SessionStore().get_snapshot(session_id)
+    memory_context_text = _build_memory_context_text(persistent, snap)
+    return {
+        "schema_context": schema_context,
+        "user_id": user_id,
+        "persistent_prefs": persistent,
+        "memory_context_text": memory_context_text,
+    }
 
 
 def planner_node(state: QueryAgentState) -> dict[str, Any]:
     """Plan intent/tables and draft SQL candidate."""
+    memory_block = str(state.get("memory_context_text") or "").strip()
     question = str(state.get("question") or "").strip()
+    planning_input = (
+        f"{memory_block}\n\nPregunta actual: {question}" if memory_block else question
+    )
     schema_context = state.get("schema_context") or {}
-    fallback = _heuristic_plan_and_sql(question, schema_context)
+    fallback = _heuristic_plan_and_sql(planning_input, schema_context)
 
     if not settings.llm_api_key.strip():
         return fallback
@@ -68,7 +146,7 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
     model = get_chat_model(temperature=0)
     prompt = (
         f"{QUERY_PLANNER_SQL_SYSTEM_PROMPT}\n\n"
-        f"Question: {question}\n"
+        f"Question (with memory context when present): {planning_input}\n"
         f"Schema context: {json.dumps(schema_context, ensure_ascii=False)}"
     )
     raw = model.invoke(prompt).content
@@ -107,6 +185,7 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
 
 def critic_node(state: QueryAgentState) -> dict[str, Any]:
     """Critic/validator node before executing SQL."""
+    memory_block = str(state.get("memory_context_text") or "").strip()
     question = str(state.get("question") or "").strip()
     schema_context = state.get("schema_context") or {}
     sql_candidate = str(state.get("sql_candidate") or "").strip()
@@ -116,9 +195,15 @@ def critic_node(state: QueryAgentState) -> dict[str, Any]:
         return _critic_to_state_update(fallback)
 
     model = get_chat_model(temperature=0)
+    mem = (
+        f"Contexto de memoria (persistente y de sesion):\n{memory_block}\n\n"
+        if memory_block
+        else ""
+    )
     prompt = (
         f"{QUERY_CRITIC_SYSTEM_PROMPT}\n\n"
-        f"Question: {question}\n"
+        f"{mem}"
+        f"Pregunta del usuario: {question}\n"
         f"Schema context: {json.dumps(schema_context, ensure_ascii=False)}\n"
         f"SQL candidate: {sql_candidate}"
     )
@@ -170,6 +255,18 @@ def execute_query_node(state: QueryAgentState) -> dict[str, Any]:
 
 def finalize_query_node(state: QueryAgentState) -> dict[str, Any]:
     """Ensure response consistency for non-executed paths."""
+    session_id = str(state.get("session_id") or "default")
+    SessionStore().record_turn(
+        session_id,
+        question=str(state.get("question") or ""),
+        sql_candidate=state.get("sql_candidate"),
+        status=str(state.get("status") or ""),
+        clarification_question=state.get("clarification_question"),
+        candidate_tables=list(state.get("candidate_tables") or []),
+        intent=str(state.get("intent")) if state.get("intent") else None,
+        assistant_summary=_assistant_turn_summary(state),
+    )
+
     status = state.get("status")
     if status == "ok" or status == "blocked_missing_schema":
         return {}

@@ -9,8 +9,12 @@ class QueryAgentState(TypedDict, total=False):
     """State for query flow with planner, critic and execution."""
 
     session_id: str
+    user_id: str
     question: str
     schema_context: dict[str, list[str]]
+
+    persistent_prefs: dict[str, str]
+    memory_context_text: str
 
     intent: str
     candidate_tables: list[str]

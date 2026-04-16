@@ -1,0 +1,30 @@
+Diseno de memoria — estilo DEMO02-memory + archivos de la consigna
+===================================================================
+
+Referencias
+-----------
+- Consigna: `memory/persistent_store.py` y `memory/session_store.py`.
+- Patron DEMO02-memory: `WorkingMemory` (buffer por tokens), trazas `trace_log`,
+  persistencia relacional para estado cross-session (en el demo: episodic PostgreSQL).
+
+Capas
+-----
+
+1) Preferencias persistentes — `memory/persistent_store.py`
+   - Backend **postgres** (por defecto): tabla `user_preferences` en `DATABASE_URL`,
+     UPSERT por `user_id` (clave fija `default` en el Query Agent; mismo espiritu que episodic en DEMO02).
+   - Backend **json**: archivo `USER_PREFERENCES_PATH` (tests / entornos sin migracion).
+   - Selector: `PREFERENCES_STORE_BACKEND=postgres|json`.
+   - Campos: language, format, date_preference, strictness.
+
+2) Memoria de sesion — `memory/session_store.py`
+   - Archivo JSON por `session_id` + TTL (`SESSION_MEMORY_TTL_SECONDS`).
+   - **WorkingMemory** (`memory/working.py`): mensajes role/content con limite de tokens
+     (`WORKING_SESSION_TOKEN_LIMIT`), alineado a DEMO02 `working.py`.
+   - Campos estructurados: ultima pregunta, ultimo SQL, supuestos, aclaraciones, filtros (WHERE).
+
+3) Trazas — `memory/trace.py`
+   - `trace_log("WORKING"|"EPISODIC"|...)` para observabilidad de memoria (CoALA / DEMO02).
+
+Politica en el Query Agent (prepare / planner / critic / finalize) sin cambios funcionales:
+prepare lee ambas; finalize escribe SessionStore; planner/critic leen el texto enriquecido.
