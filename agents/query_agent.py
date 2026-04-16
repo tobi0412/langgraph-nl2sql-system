@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from graph.query_graph import build_query_graph
+from settings import settings
 
 
 @dataclass
@@ -16,6 +17,18 @@ class QueryAgentRunner:
 
     def __post_init__(self) -> None:
         self._graph = build_query_graph()
+
+    def _config(self, session_id: str, *, run_name: str) -> dict[str, Any]:
+        """LangSmith tracing config for Query Agent runs."""
+        cfg: dict[str, Any] = {}
+        if settings.langchain_tracing_v2:
+            cfg["run_name"] = run_name
+            cfg["tags"] = ["query-agent", "langgraph", "nl2sql-system"]
+            cfg["metadata"] = {
+                "session_id": session_id,
+                "component": "query-agent",
+            }
+        return cfg
 
     def run(
         self,
@@ -30,7 +43,8 @@ class QueryAgentRunner:
                 "question": (question or "").strip(),
                 "session_id": session_id,
                 "user_id": user_id,
-            }
+            },
+            self._config(session_id, run_name="query-agent-run"),
         )
         sql_final = state.get("sql_candidate") or None
         return {

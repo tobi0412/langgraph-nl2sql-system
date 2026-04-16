@@ -4,6 +4,7 @@ import logging
 import uuid
 
 import psycopg
+from langsmith import traceable
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,7 @@ class MCPSQLQueryTool(BaseTool):
     )
     args_schema: type[BaseModel] = MCPSQLQueryInput
 
+    @traceable(run_type="tool", name="mcp_sql_query", tags=["mcp-tool", "sql"])
     def _run(self, sql: str) -> dict[str, object]:
         """Execute read-only SQL and return a serializable payload."""
         call_id = str(uuid.uuid4())
