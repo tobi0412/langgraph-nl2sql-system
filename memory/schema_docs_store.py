@@ -1,4 +1,14 @@
-"""Persistent storage for approved schema documentation (iteration 3)."""
+"""Persistent storage for approved schema documentation (iteration 3/6).
+
+Integration contract for Query Agent (iteration 6):
+- top-level entry fields: ``version``, ``approved_at``, ``session_id``, ``document``
+- ``document`` must be a dict with ``tables: list[dict]``
+- each table consumed by Query Agent must expose:
+  - ``table_name: str``
+  - ``columns: list[dict]``
+- each consumed column must expose:
+  - ``name: str``
+"""
 
 from __future__ import annotations
 
@@ -36,6 +46,42 @@ class SchemaDocsStore:
         data = self.load_raw()
         entries: list[dict[str, Any]] = data.get("entries", [])
         return list(entries)
+
+    def extract_query_schema_context(
+        self,
+        entry: dict[str, Any] | None,
+    ) -> dict[str, list[str]]:
+        """Return the minimal contract consumed by Query Agent.
+
+        This keeps the integration explicit: Query Agent only depends on
+        ``table_name`` and column ``name`` fields from the persisted schema.
+        Invalid or incomplete shapes degrade to an empty mapping.
+        """
+        if not isinstance(entry, dict):
+            return {}
+        document = entry.get("document")
+        if not isinstance(document, dict):
+            return {}
+        tables = document.get("tables")
+        if not isinstance(tables, list):
+            return {}
+
+        schema_context: dict[str, list[str]] = {}
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            table_name = table.get("table_name")
+            if not isinstance(table_name, str) or not table_name.strip():
+                continue
+            cols = table.get("columns")
+            if not isinstance(cols, list):
+                continue
+            schema_context[table_name] = [
+                str(col.get("name"))
+                for col in cols
+                if isinstance(col, dict) and isinstance(col.get("name"), str)
+            ]
+        return schema_context
 
     def latest(self) -> dict[str, Any] | None:
         """Return latest approved schema entry for single-user mode."""

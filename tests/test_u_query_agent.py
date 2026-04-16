@@ -4,6 +4,7 @@ import graph.query_nodes as query_nodes_module
 import pytest
 from agents.query_agent import QueryAgent
 from tools.mcp_sql_tool import MCPSQLQueryTool
+from tools.mcp_schema_tool import MCPSchemaInspectTool
 
 
 def _schema_entry():
@@ -21,6 +22,7 @@ def _schema_entry():
 @pytest.fixture(autouse=True)
 def _disable_llm(monkeypatch):
     monkeypatch.setattr(query_nodes_module.settings, "llm_api_key", "")
+    monkeypatch.setattr(query_nodes_module.settings, "preferences_store_backend", "json")
 
 
 def test_u_query_agent_maps_intent_to_film():
@@ -85,3 +87,16 @@ def test_u_query_agent_blocks_when_schema_is_missing(monkeypatch):
     assert result["status"] == "blocked_missing_schema"
     assert result["sql_final"] is None
     assert "schema agent" in result["limitations"][1].lower()
+
+
+def test_u_query_agent_never_uses_schema_inspect_as_fallback(monkeypatch):
+    monkeypatch.setattr(query_nodes_module.SchemaDocsStore, "latest", lambda self: None)
+
+    def _unexpected_schema_call(*args, **kwargs):
+        raise AssertionError("Query Agent no deberia invocar mcp_schema_inspect")
+
+    monkeypatch.setattr(MCPSchemaInspectTool, "_run", _unexpected_schema_call)
+    agent = QueryAgent()
+    result = agent.run("Lista actores")
+    assert result["status"] == "blocked_missing_schema"
+    assert "schema inspect" in result["limitations"][0].lower()

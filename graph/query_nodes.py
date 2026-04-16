@@ -82,23 +82,7 @@ def prepare_query_node(state: QueryAgentState) -> dict[str, Any]:
     session_id = str(state.get("session_id") or "default")
     store = SchemaDocsStore()
     latest = store.latest()
-    doc = latest.get("document") if isinstance(latest, dict) else None
-    schema_context: dict[str, list[str]] = {}
-    if isinstance(doc, dict):
-        tables = doc.get("tables")
-        if isinstance(tables, list):
-            for table in tables:
-                if not isinstance(table, dict):
-                    continue
-                table_name = table.get("table_name")
-                if not isinstance(table_name, str):
-                    continue
-                cols = table.get("columns") or []
-                schema_context[table_name] = [
-                    c.get("name")
-                    for c in cols
-                    if isinstance(c, dict) and isinstance(c.get("name"), str)
-                ]
+    schema_context = store.extract_query_schema_context(latest)
     if not schema_context:
         return {
             "schema_context": {},

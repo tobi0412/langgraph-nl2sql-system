@@ -35,3 +35,37 @@ def test_schema_docs_store_keeps_single_current_schema(tmp_path: Path):
     assert latest is not None
     assert latest["version"] == 2
     assert latest["document"]["tables"][0]["table_name"] == "actor"
+
+
+def test_schema_docs_store_extracts_minimal_query_contract(tmp_path: Path):
+    path = tmp_path / "docs.json"
+    store = SchemaDocsStore(path=str(path))
+    entry = store.save_approved(
+        session_id="s1",
+        document={
+            "tables": [
+                {
+                    "table_name": "film",
+                    "description": "movies",
+                    "columns": [
+                        {"name": "film_id", "description": "pk"},
+                        {"name": "title", "description": "movie title"},
+                    ],
+                }
+            ]
+        },
+    )
+
+    schema_context = store.extract_query_schema_context(entry)
+    assert schema_context == {"film": ["film_id", "title"]}
+
+
+def test_schema_docs_store_invalid_contract_degrades_to_empty_mapping(tmp_path: Path):
+    path = tmp_path / "docs.json"
+    store = SchemaDocsStore(path=str(path))
+
+    schema_context = store.extract_query_schema_context(
+        {"version": 1, "document": {"tables": [{"table_name": "film", "columns": "bad"}]}}
+    )
+
+    assert schema_context == {}
