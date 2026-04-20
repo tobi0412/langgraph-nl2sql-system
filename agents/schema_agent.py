@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -102,6 +102,76 @@ class SchemaAgentRunner:
             Command(resume=human_feedback),
             self._config(session_id, run_name="schema-agent-resume"),
         )
+
+    def stream_start(
+        self,
+        *,
+        session_id: str,
+        user_message: str = "Document the public schema for the DVD rental database.",
+        reset_schema: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream node-level updates until HITL interrupt or completion.
+
+        Yields dicts with ``kind`` in {"node", "interrupt", "final", "error"}.
+        """
+        try:
+            existing_entries = self.schema_docs_store.list_approved()
+            has_existing_schema = bool(existing_entries) and not reset_schema
+            preloaded_schema_metadata: dict[str, Any] | None = None
+            if not has_existing_schema:
+                preloaded_schema_metadata = run_schema_inspect_for_preload(
+                    self.schema_inspect_tool
+                )
+            state = create_initial_schema_state(
+                session_id=session_id,
+                user_message=user_message,
+                has_existing_schema=has_existing_schema,
+                reset_schema=reset_schema,
+                preloaded_schema_metadata=preloaded_schema_metadata,
+            )
+            config = self._config(session_id, run_name="schema-agent-start")
+            yield from self._stream_graph(state, config)
+        except Exception as exc:  # noqa: BLE001
+            yield {"kind": "error", "message": str(exc)}
+
+    def stream_resume(
+        self,
+        *,
+        session_id: str,
+        human_feedback: dict[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        """Stream node-level updates after HITL resume."""
+        try:
+            config = self._config(session_id, run_name="schema-agent-resume")
+            yield from self._stream_graph(Command(resume=human_feedback), config)
+        except Exception as exc:  # noqa: BLE001
+            yield {"kind": "error", "message": str(exc)}
+
+    def _stream_graph(self, payload: Any, config: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        """Iterate graph updates, yielding node events and final state snapshot."""
+        interrupt_value: Any = None
+        for chunk in self._graph.stream(payload, config, stream_mode="updates"):
+            if not isinstance(chunk, dict):
+                continue
+            for node_name, update in chunk.items():
+                if node_name == "__interrupt__":
+                    interrupt_value = update
+                    continue
+                yield {"kind": "node", "name": node_name, "update": update}
+
+        snapshot = self._graph.get_state(config)
+        final_state: dict[str, Any] = dict(getattr(snapshot, "values", {}) or {})
+        if interrupt_value is not None:
+            final_state["__interrupt__"] = interrupt_value
+        else:
+            tasks = getattr(snapshot, "tasks", None) or ()
+            pending = []
+            for task in tasks:
+                task_interrupts = getattr(task, "interrupts", None) or ()
+                pending.extend(task_interrupts)
+            if pending:
+                final_state["__interrupt__"] = tuple(pending)
+        yield {"kind": "final", "state": final_state}
 
 
 def build_schema_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):

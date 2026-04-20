@@ -44,7 +44,7 @@ def test_u_mcp_schema_inspect_shape(monkeypatch):
 
     shared_cursor = DummyCursor()
     monkeypatch.setattr(
-        "tools.mcp_schema_tool.psycopg.connect",
+        "tools.service.psycopg.connect",
         lambda *args, **kwargs: DummyConn(shared_cursor),
     )
     payload = MCPSchemaInspectTool()._run()
@@ -94,7 +94,7 @@ def test_u_mcp_schema_inspect_supports_table_filter_and_samples(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return None
 
-    monkeypatch.setattr("tools.mcp_schema_tool.psycopg.connect", lambda *args, **kwargs: DummyConn())
+    monkeypatch.setattr("tools.service.psycopg.connect", lambda *args, **kwargs: DummyConn())
     payload = MCPSchemaInspectTool()._run(table_names=["film", "actor"], sample_rows=3)
 
     assert payload["table_count"] == 2

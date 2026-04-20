@@ -24,6 +24,9 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     db_connect_timeout: int = Field(default=5, alias="DB_CONNECT_TIMEOUT")
+    mcp_tools_mode: str = Field(default="local", alias="MCP_TOOLS_MODE")
+    mcp_tools_base_url: str = Field(default="http://localhost:8010", alias="MCP_TOOLS_BASE_URL")
+    mcp_tools_timeout_seconds: float = Field(default=15.0, alias="MCP_TOOLS_TIMEOUT_SECONDS")
 
     llm_model: str = Field(default="gpt-4.1-mini", alias="LLM_MODEL")
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")

@@ -17,3 +17,13 @@
    - `docker exec -i langgraph-nl2sql-postgres pg_restore -U postgres -d dvdrental /tmp/dvdrental.tar`
 4. Verify key tables:
    - `docker exec -i langgraph-nl2sql-postgres psql -U postgres -d dvdrental -c "\dt public.film public.actor public.rental"`
+
+## Final hardening step (strong DB guardrail)
+
+Apply the read-only role/user policy so the agent cannot write even if app-level guardrails fail:
+
+- `docker exec -i langgraph-nl2sql-postgres psql -U postgres -d dvdrental -f /docker-entrypoint-initdb.d/002_readonly_guardrail.sql`
+
+Then switch your app `DATABASE_URL` to the read-only user (after changing password):
+
+- `postgresql://nl2sql_reader:<your_password>@localhost:5433/dvdrental`

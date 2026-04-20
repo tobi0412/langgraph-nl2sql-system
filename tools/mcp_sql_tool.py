@@ -3,12 +3,13 @@
 import logging
 import uuid
 
-import psycopg
 from langsmith import traceable
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from settings import settings
+from tools.http_client import call_tools_service
+from tools.service import execute_read_only_sql_query
 from tools.sql_guard import validate_read_only_sql
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class MCPSQLQueryTool(BaseTool):
     def _run(self, sql: str) -> dict[str, object]:
         """Execute read-only SQL and return a serializable payload."""
         call_id = str(uuid.uuid4())
-        normalized = validate_read_only_sql(sql)
+        validate_read_only_sql(sql)
 
         logger.info(
             "mcp_tool_call",
@@ -44,22 +45,10 @@ class MCPSQLQueryTool(BaseTool):
                 "request": {"sql": sql},
             },
         )
-
-        with psycopg.connect(settings.database_url, connect_timeout=settings.db_connect_timeout) as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                rows = cur.fetchall()
-                columns = [desc.name for desc in cur.description] if cur.description else []
-
-        response = {
-            "tool": "mcp_sql_query",
-            "call_id": call_id,
-            "sql": sql,
-            "normalized_sql": normalized,
-            "row_count": len(rows),
-            "columns": columns,
-            "rows": [list(row) for row in rows],
-        }
+        if settings.mcp_tools_mode.lower() == "http":
+            response = call_tools_service("/tools/sql-query", {"sql": sql})
+        else:
+            response = execute_read_only_sql_query(sql)
 
         logger.info(
             "mcp_tool_response",

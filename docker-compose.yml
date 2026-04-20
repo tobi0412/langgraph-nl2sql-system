@@ -12,8 +12,12 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/dvdrental
       - APP_HOST=0.0.0.0
       - APP_PORT=8000
+      - MCP_TOOLS_MODE=http
+      - MCP_TOOLS_BASE_URL=http://tools:8010
     depends_on:
       postgres:
+        condition: service_healthy
+      tools:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -47,10 +51,14 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/dvdrental
       # Healthcheck del API FastAPI (sidebar); el Schema Agent no depende del contenedor app
       - API_BASE_URL=http://app:8000
+      - MCP_TOOLS_MODE=http
+      - MCP_TOOLS_BASE_URL=http://tools:8010
     volumes:
       - ./data:/app/data
     depends_on:
       postgres:
+        condition: service_healthy
+      tools:
         condition: service_healthy
     # La imagen define HEALTHCHECK contra :8000 (uvicorn); aqui lo sobreescribimos para :8501
     healthcheck:
@@ -79,6 +87,29 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
+
+  tools:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    container_name: langgraph-nl2sql-tools
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/dvdrental
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8010
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   postgres_data:

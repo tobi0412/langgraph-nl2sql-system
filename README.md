@@ -20,6 +20,7 @@ Technical baseline from Iteration 1 for a multi-agent NL2SQL system with LangGra
 - Centralized environment configuration in `settings.py` and `.env.example`.
 - PostgreSQL connectivity validated from the healthcheck.
 - Base Docker setup (`Dockerfile`, `docker-compose.yml`, `.dockerignore`).
+- MCP tools can run local or over HTTP (`MCP_TOOLS_MODE=local|http`).
 
 ### Iteration 3 — Schema Agent (LangGraph + HITL)
 
@@ -50,7 +51,7 @@ pip install -e ".[ui]"
 streamlit run streamlit_app/app.py --server.port 8501
 ```
 
-Con Docker Compose (API + Postgres + UI):
+Con Docker Compose (API + Tools HTTP + Postgres + UI):
 
 ```bash
 docker compose up --build
@@ -63,6 +64,7 @@ docker compose up postgres streamlit --build
 ```
 
 - API: [http://localhost:8000/health](http://localhost:8000/health)
+- Tools API: [http://localhost:8010/health](http://localhost:8010/health)
 - Streamlit: [http://localhost:8501](http://localhost:8501) (`API_BASE_URL` apunta a `http://app:8000` para el healthcheck del sidebar).
 
 El Schema Agent se ejecuta **en el proceso de Streamlit** (misma imagen); el boton *Verificar API* solo comprueba que FastAPI responda.
@@ -78,6 +80,7 @@ El Schema Agent se ejecuta **en el proceso de Streamlit** (misma imagen); el bot
 Key variables:
 
 - DB: `DATABASE_URL`, `DB_CONNECT_TIMEOUT`
+- Tools remotas: `MCP_TOOLS_MODE`, `MCP_TOOLS_BASE_URL`, `MCP_TOOLS_TIMEOUT_SECONDS`
 - LLM: `LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL`
 - App: `APP_HOST`, `APP_PORT`, `APP_ENV`, `APP_LOG_LEVEL`
 - Flags: `ENABLE_SCHEMA_AGENT`, `ENABLE_QUERY_AGENT`
