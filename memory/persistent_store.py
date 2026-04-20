@@ -34,7 +34,7 @@ def _get_pg_connection():
     import psycopg
     from psycopg.rows import dict_row
 
-    return psycopg.connect(settings.database_url, row_factory=dict_row)
+    return psycopg.connect(settings.preferences_database_url, row_factory=dict_row)
 
 
 CREATE_PREFERENCES_TABLE_SQL = """

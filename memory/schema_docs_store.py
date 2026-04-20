@@ -50,12 +50,19 @@ class SchemaDocsStore:
     def extract_query_schema_context(
         self,
         entry: dict[str, Any] | None,
-    ) -> dict[str, list[str]]:
-        """Return the minimal contract consumed by Query Agent.
+    ) -> dict[str, dict[str, Any]]:
+        """Return schema context consumed by Query Agent.
 
-        This keeps the integration explicit: Query Agent only depends on
-        ``table_name`` and column ``name`` fields from the persisted schema.
-        Invalid or incomplete shapes degrade to an empty mapping.
+        The context includes both structure and semantic descriptions so the
+        planner can make better NL2SQL decisions.
+        Contract per table:
+        {
+          "table_name": {
+            "description": str,
+            "columns": [{"name": str, "description": str}, ...]
+          }
+        }
+        Invalid/incomplete entries are skipped.
         """
         if not isinstance(entry, dict):
             return {}
@@ -66,7 +73,7 @@ class SchemaDocsStore:
         if not isinstance(tables, list):
             return {}
 
-        schema_context: dict[str, list[str]] = {}
+        schema_context: dict[str, dict[str, Any]] = {}
         for table in tables:
             if not isinstance(table, dict):
                 continue
@@ -76,11 +83,31 @@ class SchemaDocsStore:
             cols = table.get("columns")
             if not isinstance(cols, list):
                 continue
-            schema_context[table_name] = [
-                str(col.get("name"))
-                for col in cols
-                if isinstance(col, dict) and isinstance(col.get("name"), str)
-            ]
+            parsed_columns: list[dict[str, str]] = []
+            for col in cols:
+                if not isinstance(col, dict):
+                    continue
+                name = col.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                description = col.get("description")
+                parsed_columns.append(
+                    {
+                        "name": name.strip(),
+                        "description": str(description).strip()
+                        if isinstance(description, str)
+                        else "",
+                    }
+                )
+            if not parsed_columns:
+                continue
+            table_description = table.get("description")
+            schema_context[table_name.strip()] = {
+                "description": str(table_description).strip()
+                if isinstance(table_description, str)
+                else "",
+                "columns": parsed_columns,
+            }
         return schema_context
 
     def latest(self) -> dict[str, Any] | None:
@@ -89,6 +116,19 @@ class SchemaDocsStore:
         if not entries:
             return None
         return max(entries, key=lambda e: int(e.get("version", 0)))
+
+    def clear(self) -> None:
+        """Delete all persisted approved schema entries.
+
+        Used by the UI ``Reset schema`` action so the Query Agent sees a clean
+        slate immediately (not on the next message).
+        """
+        self._ensure_parent()
+        self._path.write_text(
+            json.dumps({"entries": []}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info("schema_docs_cleared", extra={"path": str(self._path)})
 
     def save_approved(
         self,

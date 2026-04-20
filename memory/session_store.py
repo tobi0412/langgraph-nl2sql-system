@@ -31,6 +31,7 @@ class SessionSnapshot:
 
     last_question: str = ""
     last_sql: str = ""
+    last_status: str = ""
     assumptions: list[str] = field(default_factory=list)
     clarifications: list[str] = field(default_factory=list)
     recent_filters: list[str] = field(default_factory=list)
@@ -102,6 +103,7 @@ class SessionStore:
         return SessionSnapshot(
             last_question=str(raw.get("last_question") or ""),
             last_sql=str(raw.get("last_sql") or ""),
+            last_status=str(raw.get("last_status") or ""),
             assumptions=[str(x) for x in raw.get("assumptions") or [] if isinstance(x, str)][
                 -_MAX_ASSUMPTIONS:
             ],

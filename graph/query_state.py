@@ -11,10 +11,12 @@ class QueryAgentState(TypedDict, total=False):
     session_id: str
     user_id: str
     question: str
-    schema_context: dict[str, list[str]]
+    schema_context: dict[str, dict[str, Any]]
 
     persistent_prefs: dict[str, str]
     memory_context_text: str
+    response_style_instruction: str | None
+    pending_clarification_text: str
 
     intent: str
     candidate_tables: list[str]
@@ -26,6 +28,11 @@ class QueryAgentState(TypedDict, total=False):
     validator: dict[str, Any]
 
     status: str
+    assistant_text: str
     explanation: str
     limitations: list[str]
     sample: dict[str, Any] | None
+
+    plan_retry_count: int
+    plan_feedback: str | None
+    plan_feedback_source: str | None

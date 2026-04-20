@@ -23,12 +23,16 @@ class Settings(BaseSettings):
         default="postgresql://postgres:postgres@localhost:5432/dvdrental",
         alias="DATABASE_URL",
     )
+    preferences_database_url: str = Field(
+        default="postgresql://postgres:postgres@localhost:5434/user_preferences",
+        alias="PREFERENCES_DATABASE_URL",
+    )
     db_connect_timeout: int = Field(default=5, alias="DB_CONNECT_TIMEOUT")
     mcp_tools_mode: str = Field(default="local", alias="MCP_TOOLS_MODE")
     mcp_tools_base_url: str = Field(default="http://localhost:8010", alias="MCP_TOOLS_BASE_URL")
     mcp_tools_timeout_seconds: float = Field(default=15.0, alias="MCP_TOOLS_TIMEOUT_SECONDS")
 
-    llm_model: str = Field(default="gpt-4.1-mini", alias="LLM_MODEL")
+    llm_model: str = Field(default="gpt-5-nano", alias="LLM_MODEL")
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="https://sa-llmproxy.it.itba.edu.ar", alias="LLM_BASE_URL")
 
@@ -48,7 +52,7 @@ class Settings(BaseSettings):
         default="data/user_preferences.json",
         alias="USER_PREFERENCES_PATH",
     )
-    # postgres: tabla en DATABASE_URL (estilo DEMO02 episodic). json: archivo USER_PREFERENCES_PATH.
+    # postgres: table in PREFERENCES_DATABASE_URL. json: USER_PREFERENCES_PATH file.
     preferences_store_backend: str = Field(default="postgres", alias="PREFERENCES_STORE_BACKEND")
     session_memory_path: str = Field(
         default="data/session_memory.json",
@@ -71,6 +75,27 @@ class Settings(BaseSettings):
         default="https://api.smith.langchain.com",
         alias="LANGCHAIN_ENDPOINT",
     )
+
+    @property
+    def sql_dialect(self) -> str:
+        """Human-readable SQL engine name derived from ``database_url``.
+
+        Used by the Query Agent prompts so the LLM generates dialect-correct
+        syntax (functions, quoting, pagination, etc.) without hard-coding
+        a single engine in the prompt text.
+        """
+        url = (self.database_url or "").strip().lower()
+        if url.startswith(("postgres://", "postgresql://", "postgresql+")):
+            return "PostgreSQL"
+        if url.startswith(("mysql://", "mysql+", "mariadb://", "mariadb+")):
+            return "MySQL"
+        if url.startswith(("sqlite:", "sqlite+")):
+            return "SQLite"
+        if url.startswith(("mssql://", "mssql+", "sqlserver://")):
+            return "Microsoft SQL Server"
+        if url.startswith(("oracle://", "oracle+")):
+            return "Oracle"
+        return "PostgreSQL"
 
 
 settings = Settings()

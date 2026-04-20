@@ -760,6 +760,30 @@ hr,
   border-color: rgba(56, 189, 248, 0.25);
 }
 
+/* ---------- Stop-stream button (takes the slot where send would be) ---------- */
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.stream-stop-slot) button,
+div[data-testid="stVerticalBlock"]:has(> div > .stream-stop-slot) button {
+  background: var(--danger-soft) !important;
+  border: 1px solid rgba(239, 68, 68, 0.4) !important;
+  color: var(--danger) !important;
+  font-weight: 600 !important;
+  min-height: 2.6rem !important;
+  border-radius: 12px !important;
+  box-shadow: 0 6px 22px -10px rgba(239, 68, 68, 0.4) !important;
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"]:has(.stream-stop-slot) button:hover,
+div[data-testid="stVerticalBlock"]:has(> div > .stream-stop-slot) button:hover {
+  background: rgba(239, 68, 68, 0.22) !important;
+  border-color: var(--danger) !important;
+  color: var(--danger) !important;
+  transform: translateY(-1px);
+}
+
+.stream-stop-slot {
+  display: none;
+}
+
 /* ---------- Scrollbars ---------- */
 *::-webkit-scrollbar {
   width: 10px;

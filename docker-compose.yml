@@ -10,12 +10,15 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/dvdrental
+      - PREFERENCES_DATABASE_URL=postgresql://postgres:postgres@postgres_prefs:5432/user_preferences
       - APP_HOST=0.0.0.0
       - APP_PORT=8000
       - MCP_TOOLS_MODE=http
       - MCP_TOOLS_BASE_URL=http://tools:8010
     depends_on:
       postgres:
+        condition: service_healthy
+      postgres_prefs:
         condition: service_healthy
       tools:
         condition: service_healthy
@@ -49,6 +52,7 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/dvdrental
+      - PREFERENCES_DATABASE_URL=postgresql://postgres:postgres@postgres_prefs:5432/user_preferences
       # Healthcheck del API FastAPI (sidebar); el Schema Agent no depende del contenedor app
       - API_BASE_URL=http://app:8000
       - MCP_TOOLS_MODE=http
@@ -57,6 +61,8 @@ services:
       - ./data:/app/data
     depends_on:
       postgres:
+        condition: service_healthy
+      postgres_prefs:
         condition: service_healthy
       tools:
         condition: service_healthy
@@ -80,10 +86,29 @@ services:
       POSTGRES_DB: dvdrental
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/sql/bootstrap_minimal_dvdrental.sql:/docker-entrypoint-initdb.d/001_bootstrap.sql:ro
+      # Dump oficial dvdrental (pg_dump formato custom/tar) -> se restaura en init
+      - ./data/dvdrental.tar:/dvdrental.tar:ro
+      - ./scripts/sql/001_restore_dvdrental.sh:/docker-entrypoint-initdb.d/001_restore_dvdrental.sh:ro
       - ./scripts/sql/readonly_guardrail.sql:/docker-entrypoint-initdb.d/002_readonly_guardrail.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d dvdrental"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  postgres_prefs:
+    image: postgres:16-alpine
+    container_name: langgraph-nl2sql-postgres-prefs
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: user_preferences
+    volumes:
+      - postgres_prefs_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d user_preferences"]
       interval: 5s
       timeout: 3s
       retries: 15
@@ -113,3 +138,4 @@ services:
 
 volumes:
   postgres_data:
+  postgres_prefs_data:

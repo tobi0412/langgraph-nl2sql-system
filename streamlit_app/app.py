@@ -1,13 +1,13 @@
-"""Streamlit workspace para el sistema NL2SQL (Schema Agent + Query Agent).
+"""Streamlit workspace for the NL2SQL system (Schema Agent + Query Agent).
 
-Dise\xf1o moderno oscuro con:
-- Una pesta\xf1a por agente (Schema, Query).
-- Chat persistente: cada mensaje del usuario y respuesta quedan en pantalla.
-- Indicador en vivo del progreso del grafo (nodos, tool use, razonamiento)
-  al estilo de chats de LLM conocidos (usando ``graph.stream``).
-- En la pesta\xf1a Schema, bot\xf3n para resetear el contexto del schema.
+Modern dark UI with:
+- One tab per agent (Schema, Query).
+- Persistent chat: each user/assistant turn stays on screen.
+- Live graph-progress indicator (nodes, tool use, reasoning) while processing
+  using ``graph.stream``.
+- Schema tab includes a button to reset schema context.
 
-Ejecucion local:
+Local run:
   pip install -e ".[ui]"
   streamlit run streamlit_app/app.py --server.port 8501
 """
@@ -15,15 +15,16 @@ Ejecucion local:
 from __future__ import annotations
 
 import html
-import json
 import logging
 import re
-import time
+import threading
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from queue import Empty, Queue
+from typing import Any, Callable
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,6 +37,7 @@ log_langsmith_status()
 
 from agents.query_agent import QueryAgent
 from agents.schema_agent import SchemaAgentRunner
+from memory.schema_docs_store import SchemaDocsStore
 from streamlit_app.api_client import health_check
 from streamlit_app.config_ui import get_api_base_url, get_api_timeout
 
@@ -44,66 +46,66 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_NODE_LABELS: dict[str, dict[str, str]] = {
     "agent": {
-        "pending": "Razonar sobre la documentaci\xf3n del schema",
-        "active": "Razonando sobre la documentaci\xf3n del schema...",
-        "done": "Razonamiento completado",
+        "pending": "Reason about schema documentation",
+        "active": "Reasoning about schema documentation...",
+        "done": "Reasoning complete",
         "icon": "psychology",
     },
     "tools": {
-        "pending": "Inspeccionar base de datos con mcp_schema_inspect",
-        "active": "Inspeccionando base de datos (mcp_schema_inspect)...",
-        "done": "Metadata del schema recopilada",
+        "pending": "Inspect database with mcp_schema_inspect",
+        "active": "Inspecting database (mcp_schema_inspect)...",
+        "done": "Schema metadata collected",
         "icon": "build",
     },
     "format_draft": {
-        "pending": "Formatear borrador del documento",
-        "active": "Preparando borrador JSON del schema...",
-        "done": "Borrador listo para revisi\xf3n",
+        "pending": "Format draft document",
+        "active": "Preparing schema JSON draft...",
+        "done": "Draft ready for review",
         "icon": "description",
     },
     "human_gate": {
-        "pending": "Esperar revisi\xf3n humana (HITL)",
-        "active": "Esperando tu revisi\xf3n...",
-        "done": "Revisi\xf3n recibida",
+        "pending": "Wait for human review (HITL)",
+        "active": "Waiting for your review...",
+        "done": "Review received",
         "icon": "rate_review",
     },
     "persist_approved": {
-        "pending": "Persistir documento aprobado",
-        "active": "Guardando documento aprobado...",
-        "done": "Documento persistido",
+        "pending": "Persist approved document",
+        "active": "Saving approved document...",
+        "done": "Document persisted",
         "icon": "save",
     },
 }
 
 QUERY_NODE_LABELS: dict[str, dict[str, str]] = {
     "prepare": {
-        "pending": "Cargar schema aprobado y memoria de sesi\xf3n",
-        "active": "Cargando schema aprobado y memoria de sesi\xf3n...",
-        "done": "Contexto cargado",
+        "pending": "Load approved schema and session memory",
+        "active": "Loading approved schema and session memory...",
+        "done": "Context loaded",
         "icon": "memory",
     },
     "planner": {
-        "pending": "Planificar consulta NL2SQL",
-        "active": "Planificando consulta y generando SQL candidato...",
-        "done": "Plan y SQL generados",
+        "pending": "Plan NL2SQL query",
+        "active": "Planning query and generating SQL candidate...",
+        "done": "Plan and SQL generated",
         "icon": "auto_awesome",
     },
     "critic": {
-        "pending": "Validar SQL (guard de read-only)",
-        "active": "Validando SQL candidato...",
-        "done": "SQL validado",
+        "pending": "Validate SQL (read-only guard)",
+        "active": "Validating SQL candidate...",
+        "done": "SQL validated",
         "icon": "verified_user",
     },
     "execute": {
-        "pending": "Ejecutar SQL contra PostgreSQL",
-        "active": "Ejecutando SQL contra PostgreSQL...",
-        "done": "Resultados obtenidos",
+        "pending": "Execute SQL against PostgreSQL",
+        "active": "Executing SQL against PostgreSQL...",
+        "done": "Results retrieved",
         "icon": "play_arrow",
     },
     "finish": {
-        "pending": "Finalizar respuesta",
-        "active": "Finalizando respuesta y actualizando memoria...",
-        "done": "Respuesta lista",
+        "pending": "Finalize response",
+        "active": "Finalizing response and updating memory...",
+        "done": "Response ready",
         "icon": "check_circle",
     },
 }
@@ -132,6 +134,10 @@ def _init_session_state() -> None:
         "schema_last_result": None,
         "schema_last_draft": None,
         "schema_force_reset": False,
+        "schema_docs_store": None,
+        "schema_auto_generate": False,
+        "active_stream": None,
+        "pending_tab_switch": None,
         "health_ok": None,
         "health_msg": "",
     }
@@ -152,6 +158,19 @@ def _get_query_agent() -> QueryAgent:
     return st.session_state.query_agent
 
 
+def _get_schema_docs_store() -> SchemaDocsStore:
+    if st.session_state.schema_docs_store is None:
+        st.session_state.schema_docs_store = SchemaDocsStore()
+    return st.session_state.schema_docs_store
+
+
+def _has_approved_schema() -> bool:
+    try:
+        return bool(_get_schema_docs_store().latest())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # =============================================================================
 # Header & sidebar
 # =============================================================================
@@ -167,7 +186,7 @@ def _render_agent_header(
     on_action,
     action_help: str = "",
 ) -> None:
-    """Header superior mostrando el agente activo + acci\xf3n a la derecha."""
+    """Top header showing active agent + action button."""
     left, right = st.columns([6, 1.2], vertical_alignment="center")
     with left:
         st.markdown(
@@ -197,11 +216,11 @@ def _render_agent_header(
 
 def _render_sidebar() -> str:
     with st.sidebar:
-        st.markdown("### Configuraci\xf3n")
+        st.markdown("### Configuration")
 
         api_base = st.text_input("API base URL", value=get_api_base_url())
 
-        if st.button("Verificar salud del API", use_container_width=True):
+        if st.button("Check API health", use_container_width=True):
             ok, msg = health_check(api_base, timeout=get_api_timeout())
             st.session_state.health_ok = ok
             st.session_state.health_msg = msg
@@ -216,17 +235,17 @@ def _render_sidebar() -> str:
             st.caption(st.session_state.health_msg)
 
         st.divider()
-        st.markdown("### Sesi\xf3n")
+        st.markdown("### Session")
 
         session_id = st.text_input(
             "Session ID (thread)",
             value=st.session_state.schema_session_id,
-            help="Identificador de thread para checkpointer y memoria de sesi\xf3n",
+            help="Thread identifier for checkpointer and session memory",
         )
         if session_id != st.session_state.schema_session_id:
             st.session_state.schema_session_id = session_id
 
-        if st.button("Nueva sesi\xf3n", use_container_width=True):
+        if st.button("New session", use_container_width=True):
             st.session_state.schema_session_id = str(uuid.uuid4())
             st.session_state.schema_pending_hitl = False
             st.session_state.schema_last_result = None
@@ -257,93 +276,230 @@ def _thinking_step_html(step_state: str, icon: str, text: str) -> str:
     )
 
 
-class ThinkingRenderer:
-    """Renderiza una lista viva de pasos dentro de un placeholder."""
+_STREAM_POLL_SECONDS = 0.25
 
-    def __init__(self, placeholder: Any, labels: dict[str, dict[str, str]]):
-        self.placeholder = placeholder
-        self.labels = labels
-        self.order: list[str] = []
-        self.state: dict[str, str] = {}
 
-    def mark_active(self, node: str) -> None:
-        info = self.labels.get(node)
-        if not info:
-            return
-        if node not in self.state:
-            self.order.append(node)
-        for prev in self.order:
-            if prev != node and self.state.get(prev) == "active":
-                self.state[prev] = "done"
-        self.state[node] = "active"
-        self._render()
+def _start_stream_worker(
+    *,
+    kind: str,
+    generator_factory: Callable[[], Any],
+    labels: dict[str, dict[str, str]],
+    title: str,
+    on_done: Callable[[dict[str, Any]], None],
+) -> None:
+    """Spawn a daemon thread that iterates the generator cooperatively.
 
-    def mark_done(self, node: str) -> None:
-        info = self.labels.get(node)
-        if not info:
-            return
-        if node not in self.state:
-            self.order.append(node)
-        self.state[node] = "done"
-        self._render()
+    The active stream is tracked under ``st.session_state.active_stream`` and
+    consumed by :func:`_render_active_stream_fragment`, which polls the queue
+    every ``_STREAM_POLL_SECONDS`` to render live progress and a Stop button.
+    When the stream terminates (naturally, via user-requested cancel, or due to
+    an error), ``on_done(result)`` is invoked on the main thread.
+    """
+    event_q: Queue = Queue()
+    cancel_evt = threading.Event()
+    done_evt = threading.Event()
+    shared: dict[str, Any] = {
+        "events": [],
+        "error": None,
+        "cancelled": False,
+    }
 
-    def mark_all_done(self) -> None:
-        for key in self.order:
-            if self.state.get(key) == "active":
-                self.state[key] = "done"
-        self._render()
+    def _worker() -> None:
+        gen = None
+        try:
+            gen = generator_factory()
+            for event in gen:
+                if cancel_evt.is_set():
+                    shared["cancelled"] = True
+                    break
+                shared["events"].append(event)
+                event_q.put(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("stream_worker_failed")
+            shared["error"] = str(exc)
+            err_evt = {"kind": "error", "message": str(exc)}
+            shared["events"].append(err_evt)
+            event_q.put(err_evt)
+        finally:
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            done_evt.set()
 
-    def _render(self) -> None:
+    thread = threading.Thread(target=_worker, name=f"stream-{kind}", daemon=True)
+    thread.start()
+
+    st.session_state.active_stream = {
+        "kind": kind,
+        "queue": event_q,
+        "cancel": cancel_evt,
+        "done": done_evt,
+        "shared": shared,
+        "labels": labels,
+        "title": title,
+        "on_done": on_done,
+        "order": [],
+        "node_state": {},
+        "stopping": False,
+    }
+
+
+@st.fragment(run_every=_STREAM_POLL_SECONDS)
+def _render_active_stream_fragment() -> None:
+    """Live thinking-widget renderer for the current active stream.
+
+    Runs as a Streamlit fragment that auto-reruns every
+    ``_STREAM_POLL_SECONDS`` seconds. Drains the worker queue (non-blocking),
+    updates the per-node state, and — once the worker signals ``done`` —
+    invokes ``on_done(...)`` and triggers a full app rerun so the normal
+    chat/HITL UI takes over again.
+    """
+    active = st.session_state.get("active_stream")
+    if not active:
+        return
+
+    while True:
+        try:
+            evt = active["queue"].get_nowait()
+        except Empty:
+            break
+        if evt.get("kind") != "node":
+            continue
+        name = evt.get("name", "")
+        if not name:
+            continue
+        if name not in active["node_state"]:
+            active["order"].append(name)
+        for prev in active["order"]:
+            if prev != name and active["node_state"].get(prev) == "active":
+                active["node_state"][prev] = "done"
+        active["node_state"][name] = "active"
+
+    done = active["done"].is_set()
+    if done:
+        for key, val in list(active["node_state"].items()):
+            if val == "active":
+                active["node_state"][key] = "done"
+
+    shared = active["shared"]
+    cancelled = done and shared["cancelled"]
+    error = shared["error"] if done else None
+    stopping = bool(active.get("stopping"))
+
+    if error:
+        label, state, expanded = f"Error: {error}", "error", True
+    elif cancelled:
+        label, state, expanded = "Cancelled", "error", False
+    elif done:
+        label, state, expanded = "Completed", "complete", False
+    elif stopping:
+        label, state, expanded = "Stopping after current step...", "running", True
+    else:
+        label, state, expanded = active["title"], "running", True
+
+    with st.status(label, state=state, expanded=expanded):
         html_parts: list[str] = []
-        for node in self.order:
-            info = self.labels.get(node, {})
-            status = self.state.get(node, "pending")
+        for node in active["order"]:
+            info = active["labels"].get(node, {})
+            status = active["node_state"].get(node, "pending")
             text = info.get(status, info.get("pending", node))
             icon = info.get("icon", "radio_button_unchecked")
             html_parts.append(_thinking_step_html(status, icon, text))
-        self.placeholder.markdown("\n".join(html_parts), unsafe_allow_html=True)
+        if html_parts:
+            st.markdown("\n".join(html_parts), unsafe_allow_html=True)
+        else:
+            st.caption("Starting...")
+
+    if not done:
+        return
+
+    on_done = active["on_done"]
+    events = list(shared["events"])
+    st.session_state.active_stream = None
+    try:
+        on_done({"events": events, "error": error, "cancelled": cancelled})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("stream_on_done_failed")
+        st.error(f"Failed to finalize: {exc}")
+    st.rerun(scope="app")
 
 
-def _stream_with_status(
-    events: Iterable[dict[str, Any]],
-    labels: dict[str, dict[str, str]],
-    status_title: str,
-) -> tuple[list[dict[str, Any]], Any]:
-    """Consume events yielding dicts con kind y renderiza progreso temporalmente.
+def _render_stop_button(*, key: str) -> None:
+    """Render a destructive-styled Stop button that lives where send would.
 
-    Retorna (lista de eventos, placeholder para limpieza).
-    El placeholder debe ser limpiado después de usar: placeholder.empty()
+    Cancellation is cooperative: the worker checks the cancel flag between
+    graph events, so if LangGraph is blocked on a long LLM call the actual
+    termination happens when that call returns. We reflect this in the UI so
+    the user isn't left wondering whether the click registered.
     """
-    collected: list[dict[str, Any]] = []
-    placeholder = st.empty()
-    with placeholder.status(status_title, expanded=True) as status:
-        inner_placeholder = st.empty()
-        renderer = ThinkingRenderer(inner_placeholder, labels)
-        last_node: str | None = None
-        try:
-            for event in events:
-                collected.append(event)
-                kind = event.get("kind")
-                if kind == "node":
-                    name = event.get("name", "")
-                    if last_node and last_node != name:
-                        renderer.mark_done(last_node)
-                    renderer.mark_active(name)
-                    last_node = name
-                    time.sleep(0.05)
-                elif kind == "interrupt":
-                    renderer.mark_done(last_node) if last_node else None
-                elif kind == "final":
-                    renderer.mark_all_done()
-                    status.update(label="Listo", state="complete", expanded=False)
-                elif kind == "error":
-                    renderer.mark_all_done()
-                    status.update(label="Error", state="error", expanded=True)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("stream_render_failed")
-            collected.append({"kind": "error", "message": str(exc)})
-            status.update(label=f"Error: {exc}", state="error", expanded=True)
-    return collected, placeholder
+    active = st.session_state.get("active_stream")
+    if not active:
+        return
+    stopping = bool(active.get("stopping"))
+    with st.container():
+        st.markdown('<div class="stream-stop-slot"></div>', unsafe_allow_html=True)
+        label = "Stopping..." if stopping else "Stop"
+        icon = ":material/hourglass_top:" if stopping else ":material/stop_circle:"
+        clicked = st.button(
+            label,
+            key=key,
+            use_container_width=True,
+            icon=icon,
+            disabled=stopping,
+        )
+        if clicked:
+            active["cancel"].set()
+            active["stopping"] = True
+            st.toast(
+                "Stop requested, will finish current step first.",
+                icon=":material/stop_circle:",
+            )
+            st.rerun(scope="app")
+
+
+def _render_tab_switch_js() -> None:
+    """Programmatically click a Streamlit tab once per pending request.
+
+    Streamlit dedupes component renders by HTML content, so we include a fresh
+    nonce on each call — otherwise the second invocation with identical HTML
+    would be a no-op and the tab would not switch. Also retries briefly in case
+    the tab buttons haven't mounted yet on the first tick.
+    """
+    target = st.session_state.get("pending_tab_switch")
+    if not target:
+        return
+    index = 0 if target == "schema" else 1
+    nonce = uuid.uuid4().hex
+    components.html(
+        f"""
+        <!-- tab-switch nonce={nonce} -->
+        <script>
+        (function() {{
+            var tried = 0;
+            function tryClick() {{
+                tried += 1;
+                var doc = window.parent.document;
+                var tabs = doc.querySelectorAll('button[role="tab"]');
+                if (tabs && tabs[{index}]) {{
+                    tabs[{index}].click();
+                    return;
+                }}
+                if (tried < 12) setTimeout(tryClick, 50);
+            }}
+            setTimeout(tryClick, 30);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+    st.session_state.pending_tab_switch = None
+
+
+def _is_streaming(prefix: str) -> bool:
+    active = st.session_state.get("active_stream")
+    return bool(active and str(active.get("kind", "")).startswith(prefix))
 
 
 # =============================================================================
@@ -400,10 +556,10 @@ def _render_schema_assistant(payload: dict[str, Any]) -> None:
         st.markdown(
             '<span class="status-pill ok">'
             '<span class="material-symbols-rounded" style="font-size:14px;">check_circle</span>'
-            "Documento persistido</span>",
+            "Document persisted</span>",
             unsafe_allow_html=True,
         )
-        st.markdown("#### Documento aprobado")
+        st.markdown("#### Approved document")
         st.json(result.get("approved_document"))
         return
 
@@ -411,14 +567,14 @@ def _render_schema_assistant(payload: dict[str, Any]) -> None:
         st.markdown(
             '<span class="status-pill pending">'
             '<span class="material-symbols-rounded" style="font-size:14px;">rate_review</span>'
-            "Borrador listo \u2014 requiere tu revisi\xf3n</span>",
+            "Draft ready — your review is required</span>",
             unsafe_allow_html=True,
         )
         st.markdown(
-            "He preparado un borrador del documento de schema. "
-            "Revisa el JSON y decide si **aprobar**, **editar** o **rechazar**."
+            "I prepared a schema document draft. "
+            "Review the JSON and decide whether to **approve**, **edit**, or **reject**."
         )
-        with st.expander("Ver borrador completo (JSON)", expanded=False):
+        with st.expander("View full draft (JSON)", expanded=False):
             st.json(draft)
         return
 
@@ -426,10 +582,10 @@ def _render_schema_assistant(payload: dict[str, Any]) -> None:
         st.markdown(
             '<span class="status-pill blocked">'
             '<span class="material-symbols-rounded" style="font-size:14px;">cancel</span>'
-            "Rechazado</span>",
+            "Rejected</span>",
             unsafe_allow_html=True,
         )
-        st.write(result.get("error", "Documento rechazado."))
+        st.write(result.get("error", "Document rejected."))
         return
 
     if status == "error":
@@ -448,20 +604,20 @@ def _render_schema_hitl_done(payload: dict[str, Any]) -> None:
         st.markdown(
             '<span class="status-pill ok">'
             '<span class="material-symbols-rounded" style="font-size:14px;">check_circle</span>'
-            f"Documento {('editado y ' if action == 'edit' else '')}aprobado</span>",
+            f"Document {('edited and ' if action == 'edit' else '')}approved</span>",
             unsafe_allow_html=True,
         )
-        st.markdown("El documento qued\xf3 persistido y disponible para el Query Agent.")
-        with st.expander("Ver documento aprobado", expanded=False):
+        st.markdown("The document was persisted and is now available to the Query Agent.")
+        with st.expander("View approved document", expanded=False):
             st.json(result.get("approved_document"))
     elif status == "rejected":
         st.markdown(
             '<span class="status-pill blocked">'
             '<span class="material-symbols-rounded" style="font-size:14px;">cancel</span>'
-            "Rechazado</span>",
+            "Rejected</span>",
             unsafe_allow_html=True,
         )
-        st.write(result.get("error", "Documento rechazado."))
+        st.write(result.get("error", "Document rejected."))
     else:
         st.warning(f"Estado inesperado: {status}")
         st.json(result)
@@ -478,21 +634,35 @@ def _render_query_assistant(payload: dict[str, Any]) -> None:
         st.markdown(
             '<span class="status-pill ok">'
             '<span class="material-symbols-rounded" style="font-size:14px;">check_circle</span>'
-            "Consulta ejecutada</span>",
+            "Query executed</span>",
             unsafe_allow_html=True,
         )
     elif status == "blocked_missing_schema":
         st.markdown(
             '<span class="status-pill blocked">'
             '<span class="material-symbols-rounded" style="font-size:14px;">block</span>'
-            "Falta schema aprobado</span>",
+            "Missing approved schema</span>",
             unsafe_allow_html=True,
         )
     elif status == "needs_clarification":
         st.markdown(
             '<span class="status-pill info">'
             '<span class="material-symbols-rounded" style="font-size:14px;">help</span>'
-            "Requiere aclaraci\xf3n</span>",
+            "Needs clarification</span>",
+            unsafe_allow_html=True,
+        )
+    elif status == "execution_error":
+        st.markdown(
+            '<span class="status-pill blocked">'
+            '<span class="material-symbols-rounded" style="font-size:14px;">error</span>'
+            "SQL execution failed</span>",
+            unsafe_allow_html=True,
+        )
+    elif status == "preferences_updated":
+        st.markdown(
+            '<span class="status-pill ok">'
+            '<span class="material-symbols-rounded" style="font-size:14px;">tune</span>'
+            "Preferences updated</span>",
             unsafe_allow_html=True,
         )
     else:
@@ -501,11 +671,27 @@ def _render_query_assistant(payload: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
 
-    if result.get("explanation"):
-        st.markdown(result["explanation"])
+    assistant_text = (result.get("assistant_text") or "").strip()
+    explanation = (result.get("explanation") or "").strip()
+    clarification = (result.get("clarification_question") or "").strip()
 
-    if result.get("clarification_question"):
-        st.markdown("**Aclaraci\xf3n sugerida:** " + str(result["clarification_question"]))
+    if status in ("ok", "preferences_updated"):
+        # Direct LLM reply only; no auto-generated debug line, no clarification echo.
+        if assistant_text:
+            st.markdown(assistant_text)
+    elif status == "needs_clarification":
+        # Show the clarification question directly, no "Suggested clarification:" prefix.
+        text = clarification or assistant_text
+        if text:
+            st.markdown(text)
+    else:
+        # blocked_missing_schema / execution_error / unknown: keep explanation + any extra text.
+        if explanation:
+            st.markdown(explanation)
+        if assistant_text and assistant_text != explanation:
+            st.markdown(assistant_text)
+        if clarification and clarification not in {explanation, assistant_text}:
+            st.markdown(clarification)
 
     if result.get("sql_final"):
         st.markdown("#### SQL final")
@@ -515,12 +701,12 @@ def _render_query_assistant(payload: dict[str, Any]) -> None:
     if isinstance(sample, dict):
         rows = sample.get("rows") or []
         columns = sample.get("columns") or []
-        st.markdown(f"#### Muestra de resultados \u2014 {sample.get('row_count', 0)} filas")
+        st.markdown(f"#### Result sample — {sample.get('row_count', 0)} rows")
         if rows and columns:
             table_rows = [dict(zip(columns, row)) for row in rows]
             st.dataframe(table_rows, use_container_width=True, hide_index=True)
         else:
-            st.caption("Sin filas para mostrar.")
+            st.caption("No rows to display.")
 
 
 # =============================================================================
@@ -540,23 +726,58 @@ def _render_schema_chat_history() -> None:
             _render_assistant_msg(msg["payload"])
 
 
-def _render_schema_empty_state() -> None:
+def _render_schema_empty_state(*, show_generate_button: bool) -> None:
     st.markdown(
         """
         <div class="chat-empty">
           <div class="icon"><span class="material-symbols-rounded">schema</span></div>
-          <h3>Comenc\xe9 documentando tu base de datos</h3>
-          <p>El Schema Agent inspecciona PostgreSQL y genera un documento JSON
-          con tablas, columnas y descripciones. Vos aprob\xe1s, edit\xe1s o rechaz\xe1s
-          antes de persistir.</p>
-          <div class="hints">
-            <span class="hint-pill">Document the public schema for the DVD rental database</span>
-            <span class="hint-pill">Actualiza s\xf3lo la descripci\xf3n de la tabla film</span>
-          </div>
+          <h3>Start by documenting your database</h3>
+          <p>The Schema Agent inspects PostgreSQL and generates a JSON document
+          with tables, columns, and descriptions. You can approve, edit, or reject
+          before it is persisted.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    if not show_generate_button:
+        return
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        if st.button(
+            "Generate schema documentation",
+            type="primary",
+            use_container_width=True,
+            key="schema_generate_btn",
+            icon=":material/bolt:",
+        ):
+            st.session_state.schema_auto_generate = True
+            st.rerun()
+
+
+def _render_query_empty_state_blocked() -> None:
+    """Empty state for Query Agent when no approved schema exists."""
+    st.markdown(
+        """
+        <div class="chat-empty">
+          <div class="icon"><span class="material-symbols-rounded">block</span></div>
+          <h3>No approved schema yet</h3>
+          <p>The Query Agent needs an approved schema document before answering.
+          Go to the Schema Agent tab to generate one and unlock NL2SQL chat.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        if st.button(
+            "Go to Schema Agent",
+            type="primary",
+            use_container_width=True,
+            key="query_go_to_schema_btn",
+            icon=":material/arrow_back:",
+        ):
+            st.session_state.pending_tab_switch = "schema"
+            st.rerun()
 
 
 def _draft_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -575,38 +796,151 @@ def _draft_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _clear_schema_edit_state() -> None:
+    """Remove any leftover field-level edit widgets state from previous drafts."""
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith("schema_edit_"):
+            del st.session_state[key]
+
+
+def _collect_edited_document(draft: dict[str, Any] | None) -> dict[str, Any]:
+    """Read field-level edits from session_state and reconstruct the document.
+
+    The renderer below lays out one input per editable field
+    (``table_name``, table ``description``, column ``name`` + ``description``).
+    Extra/unknown keys on each table/column are preserved as-is so we don't lose
+    data that the HITL UI doesn't surface.
+    """
+    base = draft if isinstance(draft, dict) else {}
+    edited: dict[str, Any] = {k: v for k, v in base.items() if k != "tables"}
+
+    tables_src = base.get("tables") if isinstance(base.get("tables"), list) else []
+    edited_tables: list[dict[str, Any]] = []
+    for t_idx, table in enumerate(tables_src):
+        if not isinstance(table, dict):
+            continue
+        new_table: dict[str, Any] = {k: v for k, v in table.items() if k not in {"columns"}}
+        name_key = f"schema_edit_table_name__{t_idx}"
+        desc_key = f"schema_edit_table_desc__{t_idx}"
+        new_table["table_name"] = st.session_state.get(
+            name_key, table.get("table_name", "")
+        )
+        new_table["description"] = st.session_state.get(
+            desc_key, table.get("description", "")
+        )
+
+        columns_src = table.get("columns") if isinstance(table.get("columns"), list) else []
+        new_columns: list[dict[str, Any]] = []
+        for c_idx, col in enumerate(columns_src):
+            if not isinstance(col, dict):
+                continue
+            new_col: dict[str, Any] = dict(col)
+            c_name_key = f"schema_edit_col_name__{t_idx}__{c_idx}"
+            c_desc_key = f"schema_edit_col_desc__{t_idx}__{c_idx}"
+            new_col["name"] = st.session_state.get(c_name_key, col.get("name", ""))
+            new_col["description"] = st.session_state.get(
+                c_desc_key, col.get("description", "")
+            )
+            new_columns.append(new_col)
+        new_table["columns"] = new_columns
+        edited_tables.append(new_table)
+    edited["tables"] = edited_tables
+    return edited
+
+
+def _render_schema_edit_fields(draft: dict[str, Any] | None) -> None:
+    """Render per-field editors for the draft document.
+
+    Instead of presenting the raw JSON, each table/column is shown as a form row
+    so the user can tweak individual fields (typical HITL use case: refine
+    descriptions) without touching the JSON structure.
+    """
+    tables = []
+    if isinstance(draft, dict):
+        raw_tables = draft.get("tables")
+        if isinstance(raw_tables, list):
+            tables = [t for t in raw_tables if isinstance(t, dict)]
+
+    if not tables:
+        st.info("The draft has no tables to edit.")
+        return
+
+    st.caption(
+        f"Editing {len(tables)} table(s). Changes apply only when you confirm below."
+    )
+    for t_idx, table in enumerate(tables):
+        table_name = str(table.get("table_name", f"table_{t_idx}"))
+        with st.expander(
+            f":material/table: {table_name}",
+            expanded=(t_idx == 0),
+        ):
+            name_col, _ = st.columns([2, 3])
+            with name_col:
+                st.text_input(
+                    "Table name",
+                    value=str(table.get("table_name", "")),
+                    key=f"schema_edit_table_name__{t_idx}",
+                )
+            st.text_area(
+                "Table description",
+                value=str(table.get("description", "")),
+                key=f"schema_edit_table_desc__{t_idx}",
+                height=72,
+            )
+            columns = table.get("columns")
+            if not isinstance(columns, list) or not columns:
+                st.caption("No columns in this table.")
+                continue
+            st.markdown("**Columns**")
+            for c_idx, col in enumerate(columns):
+                if not isinstance(col, dict):
+                    continue
+                c_name_col, c_desc_col = st.columns([1, 3])
+                with c_name_col:
+                    st.text_input(
+                        "Name",
+                        value=str(col.get("name", "")),
+                        key=f"schema_edit_col_name__{t_idx}__{c_idx}",
+                        label_visibility="collapsed" if c_idx > 0 else "visible",
+                    )
+                with c_desc_col:
+                    st.text_input(
+                        "Description",
+                        value=str(col.get("description", "")),
+                        key=f"schema_edit_col_desc__{t_idx}__{c_idx}",
+                        label_visibility="collapsed" if c_idx > 0 else "visible",
+                    )
+
+
 def _render_schema_hitl_controls(session_id: str) -> None:
     if not st.session_state.schema_pending_hitl:
         return
+    if _is_streaming("schema"):
+        # While the HITL resume worker is running, controls are frozen.
+        return
     draft = st.session_state.schema_last_draft
     st.markdown("---")
-    st.markdown("#### Revisi\xf3n humana (HITL)")
+    st.markdown("#### Human review (HITL)")
     action = st.radio(
-        "Decisi\xf3n",
+        "Decision",
         ("approve", "edit", "reject"),
         horizontal=True,
         format_func=lambda x: {
-            "approve": "Aprobar",
-            "edit": "Editar JSON",
-            "reject": "Rechazar",
+            "approve": "Approve",
+            "edit": "Edit fields",
+            "reject": "Reject",
         }[x],
         key="schema_hitl_action",
     )
-    edited_json = ""
     if action == "edit":
-        edited_json = st.text_area(
-            "Documento editado (JSON v\xe1lido)",
-            value=json.dumps(draft or {}, indent=2, ensure_ascii=False),
-            height=320,
-            key="schema_hitl_edit",
-        )
+        _render_schema_edit_fields(draft)
     reason = ""
     if action == "reject":
         reason = st.text_input(
-            "Motivo (opcional)", value="", key="schema_hitl_reason"
+            "Reason (optional)", value="", key="schema_hitl_reason"
         )
 
-    confirm = st.button("Confirmar decisi\xf3n", type="primary", key="schema_hitl_confirm")
+    confirm = st.button("Confirm decision", type="primary", key="schema_hitl_confirm")
     if not confirm:
         return
 
@@ -615,155 +949,263 @@ def _render_schema_hitl_controls(session_id: str) -> None:
     elif action == "reject":
         human_feedback = {"action": "reject", "reason": reason or "rejected"}
     else:
-        try:
-            parsed = json.loads(edited_json)
-        except json.JSONDecodeError as exc:
-            st.error(f"JSON inv\xe1lido: {exc}")
-            return
-        human_feedback = {"action": "edit", "edited_document": parsed}
+        edited_document = _collect_edited_document(draft if isinstance(draft, dict) else {})
+        human_feedback = {"action": "edit", "edited_document": edited_document}
 
-    _append_schema("user", _hitl_user_label(action, reason))
-
-    events, thinking_placeholder = _stream_with_status(
-        _get_runner().stream_resume(
-            session_id=session_id, human_feedback=human_feedback
-        ),
-        SCHEMA_NODE_LABELS,
-        "Aplicando decisi\xf3n del humano...",
+    _start_schema_resume(
+        session_id=session_id,
+        human_feedback=human_feedback,
+        action=action,
+        reason=reason,
     )
-    final = _find_final(events)
-    errors = [e for e in events if e.get("kind") == "error"]
-    if errors:
-        msg = errors[0].get("message", "Error ejecutando resume")
-        _append_schema("assistant", {"kind": "error", "message": msg})
-        thinking_placeholder.empty()
-        st.rerun()
-        return
-    if not final:
-        _append_schema(
-            "assistant",
-            {"kind": "error", "message": "No se recibi\xf3 resultado final"},
-        )
-        thinking_placeholder.empty()
-        st.rerun()
-        return
-    result = final.get("state") or {}
-    st.session_state.schema_last_result = result
-    st.session_state.schema_pending_hitl = False
-    st.session_state.schema_last_draft = None
-    _append_schema(
-        "assistant",
-        {"kind": "schema_hitl_done", "action": action, "result": result},
-    )
-    thinking_placeholder.empty()
     st.rerun()
 
 
 def _hitl_user_label(action: str, reason: str) -> str:
     if action == "approve":
-        return "Decisi\xf3n HITL: **Aprobar**"
+        return "HITL decision: **Approve**"
     if action == "edit":
-        return "Decisi\xf3n HITL: **Editar JSON** (con cambios)"
+        return "HITL decision: **Edit JSON** (with changes)"
     suffix = f" \u2014 motivo: {reason}" if reason else ""
-    return "Decisi\xf3n HITL: **Rechazar**" + suffix
+    return "HITL decision: **Reject**" + suffix
+
+
+@st.dialog("Reset schema documentation")
+def _reset_schema_dialog() -> None:
+    """Modal confirmation for destructive schema reset.
+
+    On confirm the persisted ``schema_docs.json`` is cleared immediately (not on
+    the next message) so the Query Agent sees the empty-schema state right away.
+    """
+    has_schema = _has_approved_schema()
+    st.markdown(
+        "You are about to **delete the approved schema documentation**. "
+        "The Query Agent will stop responding until you generate a new one."
+    )
+    if has_schema:
+        st.markdown(
+            '<span class="status-pill pending">'
+            '<span class="material-symbols-rounded" style="font-size:14px;">warning</span>'
+            "This action cannot be undone</span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("No approved schema is currently persisted — this will only clear the chat.")
+
+    col_cancel, col_confirm = st.columns([1, 1])
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True, key="schema_reset_cancel"):
+            st.rerun()
+    with col_confirm:
+        if st.button(
+            "Delete schema",
+            use_container_width=True,
+            type="primary",
+            key="schema_reset_confirm",
+        ):
+            try:
+                _get_schema_docs_store().clear()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("schema_reset_failed")
+                st.error(f"Failed to delete schema: {exc}")
+                return
+            st.session_state.schema_force_reset = False
+            st.session_state.schema_pending_hitl = False
+            st.session_state.schema_last_result = None
+            st.session_state.schema_last_draft = None
+            st.session_state.schema_runner = None
+            st.session_state.schema_chat = []
+            st.session_state.query_chat = []
+            _clear_schema_edit_state()
+            st.toast("Schema deleted.", icon=":material/delete:")
+            st.rerun()
 
 
 def _reset_schema_context() -> None:
-    st.session_state.schema_force_reset = True
+    _reset_schema_dialog()
+
+
+_DEFAULT_SCHEMA_PROMPT = "Document the public schema for the DVD rental database."
+
+
+def _start_schema_stream(session_id: str, prompt: str) -> None:
+    """Kick off a Schema Agent run in a background worker thread."""
+    _append_schema("user", prompt)
+    runner = _get_runner()
+    reset_schema = bool(st.session_state.schema_force_reset)
+    st.session_state.schema_force_reset = False
+
+    def _factory() -> Any:
+        return runner.stream_start(
+            session_id=session_id,
+            user_message=prompt,
+            reset_schema=reset_schema,
+        )
+
+    _start_stream_worker(
+        kind="schema_start",
+        generator_factory=_factory,
+        labels=SCHEMA_NODE_LABELS,
+        title="Running Schema Agent...",
+        on_done=_finalize_schema_start,
+    )
+
+
+def _finalize_schema_start(result: dict[str, Any]) -> None:
+    if result["cancelled"]:
+        _append_schema(
+            "assistant",
+            {"kind": "error", "message": "Schema generation cancelled by user."},
+        )
+        return
+    if result["error"]:
+        _append_schema(
+            "assistant",
+            {"kind": "error", "message": result["error"]},
+        )
+        return
+    final = _find_final(result["events"])
+    if not final:
+        _append_schema(
+            "assistant",
+            {"kind": "error", "message": "No final result received from graph."},
+        )
+        return
+    state = final.get("state") or {}
+    draft = _draft_from_result(state)
+    pending = bool(state.get("__interrupt__")) or bool(draft)
+    st.session_state.schema_last_result = state
+    st.session_state.schema_last_draft = draft
+    st.session_state.schema_pending_hitl = pending
+    _clear_schema_edit_state()
+    _append_schema(
+        "assistant",
+        {
+            "kind": "schema_result",
+            "result": state,
+            "draft": draft,
+            "pending_hitl": pending,
+        },
+    )
+
+
+def _start_schema_resume(
+    *,
+    session_id: str,
+    human_feedback: dict[str, Any],
+    action: str,
+    reason: str,
+) -> None:
+    """Kick off the HITL resume in a background worker thread."""
+    _append_schema("user", _hitl_user_label(action, reason))
+    runner = _get_runner()
+
+    def _factory() -> Any:
+        return runner.stream_resume(
+            session_id=session_id, human_feedback=human_feedback
+        )
+
+    def _on_done(result: dict[str, Any]) -> None:
+        _finalize_schema_resume(result, action=action)
+
+    _start_stream_worker(
+        kind="schema_resume",
+        generator_factory=_factory,
+        labels=SCHEMA_NODE_LABELS,
+        title="Applying human decision...",
+        on_done=_on_done,
+    )
+
+
+def _finalize_schema_resume(result: dict[str, Any], *, action: str) -> None:
+    if result["cancelled"]:
+        _append_schema(
+            "assistant",
+            {"kind": "error", "message": "HITL resume cancelled by user."},
+        )
+        return
+    if result["error"]:
+        _append_schema(
+            "assistant",
+            {"kind": "error", "message": result["error"]},
+        )
+        return
+    final = _find_final(result["events"])
+    if not final:
+        _append_schema(
+            "assistant",
+            {"kind": "error", "message": "No final result received from graph."},
+        )
+        return
+    state = final.get("state") or {}
+    st.session_state.schema_last_result = state
     st.session_state.schema_pending_hitl = False
-    st.session_state.schema_last_result = None
     st.session_state.schema_last_draft = None
-    st.session_state.schema_runner = None
-    st.session_state.schema_chat = []
-    st.toast("Contexto del Schema Agent reseteado.", icon=":material/restart_alt:")
-    st.rerun()
+    _append_schema(
+        "assistant",
+        {"kind": "schema_hitl_done", "action": action, "result": state},
+    )
 
 
 def _render_schema_tab(session_id: str) -> None:
     _render_agent_header(
         icon="schema",
         title="Schema Agent",
-        subtitle="Documenta el schema con HITL y persiste el JSON aprobado",
-        action_label="Resetear schema",
+        subtitle="Document schema with HITL and persist approved JSON",
+        action_label="Reset schema",
         action_key="schema_reset_btn",
         on_action=_reset_schema_context,
-        action_help="Descarta el contexto actual y fuerza regenerar desde cero en el pr\xf3ximo mensaje.",
+        action_help="Delete the approved schema document (confirmation required).",
     )
 
-    if st.session_state.schema_force_reset:
-        st.caption(
-            "Modo reset activo: el pr\xf3ximo mensaje regenerar\xe1 la documentaci\xf3n desde cero."
-        )
+    has_schema = _has_approved_schema()
+    is_empty = not st.session_state.schema_chat
+    is_streaming = _is_streaming("schema")
+    show_generate_cta = (
+        is_empty
+        and not has_schema
+        and not st.session_state.schema_pending_hitl
+        and not is_streaming
+    )
 
     chat_area = st.container(height=_chat_area_height(), border=False)
     with chat_area:
         st.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
-        if not st.session_state.schema_chat:
-            _render_schema_empty_state()
+        if is_empty and not is_streaming:
+            _render_schema_empty_state(show_generate_button=show_generate_cta)
         else:
             _render_schema_chat_history()
+        if is_streaming:
+            _render_active_stream_fragment()
         _render_schema_hitl_controls(session_id)
         st.markdown("</div>", unsafe_allow_html=True)
 
+    if is_streaming:
+        _render_stop_button(key="schema_stop_btn")
+        return
+
+    if bool(st.session_state.schema_auto_generate):
+        st.session_state.schema_auto_generate = False
+        _start_schema_stream(session_id, _DEFAULT_SCHEMA_PROMPT)
+        st.rerun()
+        return
+
+    chat_disabled = st.session_state.schema_pending_hitl or (
+        not has_schema and show_generate_cta
+    )
+    placeholder_text = (
+        "Use the button above to generate the first schema..."
+        if chat_disabled and not st.session_state.schema_pending_hitl
+        else "Type an instruction to document the schema..."
+    )
     prompt = st.chat_input(
-        "Escrib\xed una instrucci\xf3n para documentar el schema...",
+        placeholder_text,
         key="schema_chat_input",
-        disabled=st.session_state.schema_pending_hitl,
+        disabled=chat_disabled,
     )
     if not prompt:
         return
-
-    _append_schema("user", prompt)
-    with chat_area:
-        _render_user_msg(prompt)
-
-        reset_schema = bool(st.session_state.schema_force_reset)
-        events, thinking_placeholder = _stream_with_status(
-            _get_runner().stream_start(
-                session_id=session_id,
-                user_message=prompt,
-                reset_schema=reset_schema,
-            ),
-            SCHEMA_NODE_LABELS,
-            "Ejecutando Schema Agent...",
-        )
-    st.session_state.schema_force_reset = False
-
-    errors = [e for e in events if e.get("kind") == "error"]
-    if errors:
-        msg = errors[0].get("message", "Error ejecutando Schema Agent")
-        _append_schema("assistant", {"kind": "error", "message": msg})
-        st.rerun()
-        return
-
-    final = _find_final(events)
-    if not final:
-        _append_schema(
-            "assistant",
-            {"kind": "error", "message": "No se recibi\xf3 resultado final del grafo"},
-        )
-        st.rerun()
-        return
-
-    result = final.get("state") or {}
-    draft = _draft_from_result(result)
-    pending = bool(result.get("__interrupt__")) or bool(draft)
-    st.session_state.schema_last_result = result
-    st.session_state.schema_last_draft = draft
-    st.session_state.schema_pending_hitl = pending
-    _append_schema(
-        "assistant",
-        {
-            "kind": "schema_result",
-            "result": result,
-            "draft": draft,
-            "pending_hitl": pending,
-        },
-    )
-
-    thinking_placeholder.empty()
-    with chat_area:
-        _render_schema_chat_history()
+    _start_schema_stream(session_id, prompt)
     st.rerun()
 
 
@@ -789,13 +1231,13 @@ def _render_query_empty_state() -> None:
         """
         <div class="chat-empty">
           <div class="icon"><span class="material-symbols-rounded">terminal</span></div>
-          <h3>Preguntas en lenguaje natural \u2192 SQL</h3>
-          <p>El Query Agent usa el schema aprobado por el Schema Agent para
-          planificar, validar y ejecutar SQL de solo lectura contra PostgreSQL.</p>
+          <h3>Natural language questions \u2192 SQL</h3>
+          <p>The Query Agent uses approved schema documentation from Schema Agent
+          to plan, validate, and execute read-only SQL against PostgreSQL.</p>
           <div class="hints">
-            <span class="hint-pill">\xbfCu\xe1ntos registros hay en rental?</span>
-            <span class="hint-pill">Lista los primeros 10 actores</span>
-            <span class="hint-pill">\xbfQu\xe9 pel\xedculas tienen rating PG?</span>
+            <span class="hint-pill">How many rows are there in rental?</span>
+            <span class="hint-pill">List the first 10 actors</span>
+            <span class="hint-pill">Which films have rating PG?</span>
           </div>
         </div>
         """,
@@ -808,64 +1250,87 @@ def _clear_query_chat() -> None:
     st.rerun()
 
 
-def _render_query_tab(session_id: str) -> None:
-    _render_agent_header(
-        icon="terminal",
-        title="Query Agent",
-        subtitle="NL2SQL con planner, critic y ejecuci\xf3n read-only contra PostgreSQL",
-        action_label="Limpiar chat",
-        action_key="query_clear_btn",
-        on_action=_clear_query_chat,
-        action_help="Borra el historial de chat de este agente.",
-    )
-
-    chat_area = st.container(height=_chat_area_height(), border=False)
-    with chat_area:
-        st.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
-        if not st.session_state.query_chat:
-            _render_query_empty_state()
-        else:
-            _render_query_chat_history()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    question = st.chat_input(
-        "Escrib\xed tu consulta en lenguaje natural...",
-        key="query_chat_input",
-    )
-    if not question:
-        return
-
+def _start_query_stream(session_id: str, question: str) -> None:
+    """Kick off a Query Agent run in a background worker thread."""
     _append_query("user", question)
-    with chat_area:
-        _render_user_msg(question)
+    agent = _get_query_agent()
 
-        events, thinking_placeholder = _stream_with_status(
-            _get_query_agent().stream(question, session_id=session_id),
-            QUERY_NODE_LABELS,
-            "Ejecutando Query Agent...",
+    def _factory() -> Any:
+        return agent.stream(question, session_id=session_id)
+
+    _start_stream_worker(
+        kind="query",
+        generator_factory=_factory,
+        labels=QUERY_NODE_LABELS,
+        title="Running Query Agent...",
+        on_done=_finalize_query_stream,
+    )
+
+
+def _finalize_query_stream(result: dict[str, Any]) -> None:
+    if result["cancelled"]:
+        _append_query(
+            "assistant",
+            {"kind": "error", "message": "Query cancelled by user."},
         )
-
-    errors = [e for e in events if e.get("kind") == "error"]
-    if errors:
-        msg = errors[0].get("message", "Error ejecutando Query Agent")
-        _append_query("assistant", {"kind": "error", "message": msg})
-        st.rerun()
         return
-
-    final = _find_final(events)
+    if result["error"]:
+        _append_query(
+            "assistant",
+            {"kind": "error", "message": result["error"]},
+        )
+        return
+    final = _find_final(result["events"])
     if not final:
         _append_query(
             "assistant",
-            {"kind": "error", "message": "No se recibi\xf3 respuesta final del grafo"},
+            {"kind": "error", "message": "No final response received from graph."},
         )
-        st.rerun()
         return
     response = final.get("response") or {}
     _append_query("assistant", {"kind": "query_result", "result": response})
 
-    thinking_placeholder.empty()
+
+def _render_query_tab(session_id: str) -> None:
+    _render_agent_header(
+        icon="terminal",
+        title="Query Agent",
+        subtitle="NL2SQL with planner, critic, and read-only execution against PostgreSQL",
+        action_label="Clear chat",
+        action_key="query_clear_btn",
+        on_action=_clear_query_chat,
+        action_help="Clear this agent chat history.",
+    )
+
+    has_schema = _has_approved_schema()
+    is_streaming = _is_streaming("query")
+    chat_area = st.container(height=_chat_area_height(), border=False)
     with chat_area:
-        _render_query_chat_history()
+        st.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
+        if not has_schema and not is_streaming:
+            _render_query_empty_state_blocked()
+        elif not st.session_state.query_chat and not is_streaming:
+            _render_query_empty_state()
+        else:
+            _render_query_chat_history()
+        if is_streaming:
+            _render_active_stream_fragment()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if is_streaming:
+        _render_stop_button(key="query_stop_btn")
+        return
+
+    question = st.chat_input(
+        "Type your natural language query..."
+        if has_schema
+        else "Generate schema documentation first to unlock queries...",
+        key="query_chat_input",
+        disabled=not has_schema,
+    )
+    if not question:
+        return
+    _start_query_stream(session_id, question)
     st.rerun()
 
 
@@ -915,6 +1380,8 @@ def main() -> None:
         _render_schema_tab(session_id)
     with tab_query:
         _render_query_tab(session_id)
+
+    _render_tab_switch_js()
 
 
 if __name__ == "__main__":
