@@ -19,8 +19,10 @@ class QueryAgentState(TypedDict, total=False):
     pending_clarification_text: str
 
     intent: str
+    minimum_viable_schema: list[str]
     candidate_tables: list[str]
     candidate_columns: list[str]
+    logical_plan: str
     needs_clarification: bool
     clarification_question: str | None
 

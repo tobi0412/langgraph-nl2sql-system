@@ -7,13 +7,6 @@ from typing import Literal
 from graph.query_state import QueryAgentState
 
 
-def route_after_prefs_update(state: QueryAgentState) -> Literal["prepare", "finish"]:
-    """Short-circuit to finish when the turn was only a preferences directive."""
-    if state.get("status") == "preferences_updated":
-        return "finish"
-    return "prepare"
-
-
 def route_after_prepare(state: QueryAgentState) -> Literal["finish", "planner"]:
     """If schema is missing, finish early; otherwise continue."""
     if state.get("status") == "blocked_missing_schema":

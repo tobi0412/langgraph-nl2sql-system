@@ -107,10 +107,13 @@ def _state_to_response(
             "intent": state.get("intent"),
             "candidate_tables": list(state.get("candidate_tables") or []),
             "candidate_columns": list(state.get("candidate_columns") or []),
+            "minimum_viable_schema": list(state.get("minimum_viable_schema") or []),
+            "logical_plan": state.get("logical_plan") or "",
             "needs_clarification": bool(state.get("needs_clarification")),
             "clarification_question": state.get("clarification_question"),
         },
         "validator": dict(state.get("validator") or {}),
+        "plan_retry_count": int(state.get("plan_retry_count") or 0),
     }
 
 
@@ -130,10 +133,13 @@ def _empty_question_response(question: str, session_id: str, user_id: str) -> di
             "intent": None,
             "candidate_tables": [],
             "candidate_columns": [],
+            "minimum_viable_schema": [],
+            "logical_plan": "",
             "needs_clarification": True,
             "clarification_question": "What query would you like to run on the database?",
         },
         "validator": {},
+        "plan_retry_count": 0,
     }
 
 

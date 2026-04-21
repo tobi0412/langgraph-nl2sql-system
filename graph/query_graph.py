@@ -8,7 +8,6 @@ from graph.query_edges import (
     route_after_critic,
     route_after_execute,
     route_after_planner,
-    route_after_prefs_update,
     route_after_prepare,
 )
 from graph.query_nodes import (
@@ -16,7 +15,7 @@ from graph.query_nodes import (
     execute_query_node,
     finalize_query_node,
     planner_node,
-    preferences_update_node,
+    prefs_finalize_node,
     prepare_query_node,
 )
 from graph.query_state import QueryAgentState
@@ -25,31 +24,32 @@ from graph.query_state import QueryAgentState
 def build_query_graph():
     """Build and compile the Query Agent graph.
 
-    Flow:
-        START -> prefs_update -> prepare -> planner -> critic -> execute -> finish
-                           \\                    \\       |          |
-                            \\__ finish          +------ planner (retry loop)
-                                                          ^ up to MAX_PLAN_RETRIES
+    Flow::
 
-    ``prefs_update`` runs first so any language/format/date/strictness change
-    is persisted before the rest of the pipeline reads preferences. When the
-    turn is ONLY a preference directive, the flow short-circuits to finish
-    without planner/critic/execute.
+        START -> prepare -> planner -> critic -> execute -> finish -> prefs_finalize -> END
+                                          |         |
+                                          +------ planner (retry loop)
+                                                  ^ up to MAX_PLAN_RETRIES
+
+    Preferences are detected and persisted by ``prefs_finalize`` at the
+    VERY END of the graph, after the user has already received the data
+    answer. This keeps the perceived response latency low: plain data
+    questions never pay for an LLM preferences-detection call on the
+    critical path, and preference directives buried inside a data
+    question take effect on the next turn rather than delaying this
+    one. Pure preference commands (e.g. "respondeme siempre en inglés")
+    still get a clean confirmation because ``prefs_finalize`` overrides
+    the final assistant payload when it detects a pure command.
     """
     graph = StateGraph(QueryAgentState)
-    graph.add_node("prefs_update", preferences_update_node)
     graph.add_node("prepare", prepare_query_node)
     graph.add_node("planner", planner_node)
     graph.add_node("critic", critic_node)
     graph.add_node("execute", execute_query_node)
     graph.add_node("finish", finalize_query_node)
+    graph.add_node("prefs_finalize", prefs_finalize_node)
 
-    graph.add_edge(START, "prefs_update")
-    graph.add_conditional_edges(
-        "prefs_update",
-        route_after_prefs_update,
-        {"prepare": "prepare", "finish": "finish"},
-    )
+    graph.add_edge(START, "prepare")
     graph.add_conditional_edges(
         "prepare",
         route_after_prepare,
@@ -70,5 +70,6 @@ def build_query_graph():
         route_after_execute,
         {"planner": "planner", "finish": "finish"},
     )
-    graph.add_edge("finish", END)
+    graph.add_edge("finish", "prefs_finalize")
+    graph.add_edge("prefs_finalize", END)
     return graph.compile()

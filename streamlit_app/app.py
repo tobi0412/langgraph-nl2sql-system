@@ -108,6 +108,12 @@ QUERY_NODE_LABELS: dict[str, dict[str, str]] = {
         "done": "Response ready",
         "icon": "check_circle",
     },
+    "prefs_finalize": {
+        "pending": "Check preferences directive",
+        "active": "Checking preferences directive...",
+        "done": "Preferences synced",
+        "icon": "tune",
+    },
 }
 
 
@@ -267,15 +273,6 @@ def _render_sidebar() -> str:
 # =============================================================================
 
 
-def _thinking_step_html(step_state: str, icon: str, text: str) -> str:
-    return (
-        f'<div class="thinking-step {step_state}">'
-        f'<span class="step-icon material-symbols-rounded">{icon}</span>'
-        f'<span>{text}</span>'
-        f"</div>"
-    )
-
-
 _STREAM_POLL_SECONDS = 0.25
 
 
@@ -360,57 +357,70 @@ def _render_active_stream_fragment() -> None:
     if not active:
         return
 
+    # Drain the node queue and track which graph nodes have fired so we can
+    # render a live checklist of "done / running / pending" steps.
+    order: list[str] = active.setdefault("order", [])
+    node_state: dict[str, int] = active.setdefault("node_state", {})
     while True:
         try:
             evt = active["queue"].get_nowait()
         except Empty:
             break
-        if evt.get("kind") != "node":
+        if not isinstance(evt, dict):
             continue
-        name = evt.get("name", "")
-        if not name:
-            continue
-        if name not in active["node_state"]:
-            active["order"].append(name)
-        for prev in active["order"]:
-            if prev != name and active["node_state"].get(prev) == "active":
-                active["node_state"][prev] = "done"
-        active["node_state"][name] = "active"
+        if evt.get("kind") == "node":
+            node_name = str(evt.get("name") or "").strip()
+            if node_name and node_name != "__interrupt__":
+                order.append(node_name)
+                node_state[node_name] = node_state.get(node_name, 0) + 1
 
     done = active["done"].is_set()
-    if done:
-        for key, val in list(active["node_state"].items()):
-            if val == "active":
-                active["node_state"][key] = "done"
-
     shared = active["shared"]
     cancelled = done and shared["cancelled"]
     error = shared["error"] if done else None
     stopping = bool(active.get("stopping"))
+    labels: dict[str, dict[str, str]] = active.get("labels") or {}
+
+    completed: set[str] = set(order)
+    label_order = list(labels.keys())
+    # LangGraph emits an event when a node finishes, so the "currently running"
+    # step is the first label that hasn't shown up in `order` yet.
+    current_node: str | None = next(
+        (n for n in label_order if n not in completed),
+        None,
+    )
 
     if error:
-        label, state, expanded = f"Error: {error}", "error", True
+        outer_label, outer_state = f"Error: {error}", "error"
     elif cancelled:
-        label, state, expanded = "Cancelled", "error", False
+        outer_label, outer_state = "Cancelled", "error"
     elif done:
-        label, state, expanded = "Completed", "complete", False
+        outer_label, outer_state = "Completed", "complete"
     elif stopping:
-        label, state, expanded = "Stopping after current step...", "running", True
+        outer_label, outer_state = "Stopping after current step...", "running"
+    elif current_node and labels.get(current_node, {}).get("active"):
+        outer_label = str(labels[current_node]["active"])
+        outer_state = "running"
     else:
-        label, state, expanded = active["title"], "running", True
+        outer_label, outer_state = active["title"], "running"
 
-    with st.status(label, state=state, expanded=expanded):
-        html_parts: list[str] = []
-        for node in active["order"]:
-            info = active["labels"].get(node, {})
-            status = active["node_state"].get(node, "pending")
-            text = info.get(status, info.get("pending", node))
-            icon = info.get("icon", "radio_button_unchecked")
-            html_parts.append(_thinking_step_html(status, icon, text))
-        if html_parts:
-            st.markdown("\n".join(html_parts), unsafe_allow_html=True)
-        else:
-            st.caption("Starting...")
+    with st.status(outer_label, state=outer_state, expanded=True):
+        for n in label_order:
+            meta = labels.get(n) or {}
+            if n in completed:
+                count = node_state.get(n, 1)
+                suffix = f" (×{count})" if count > 1 else ""
+                st.markdown(
+                    f":material/check_circle: {meta.get('done', n)}{suffix}"
+                )
+            elif not done and n == current_node:
+                st.markdown(
+                    f":material/progress_activity: **{meta.get('active', n)}**"
+                )
+            else:
+                st.markdown(
+                    f":material/radio_button_unchecked: {meta.get('pending', n)}"
+                )
 
     if not done:
         return
@@ -752,6 +762,65 @@ def _render_schema_empty_state(*, show_generate_button: bool) -> None:
         ):
             st.session_state.schema_auto_generate = True
             st.rerun()
+
+
+def _render_active_schema_summary() -> None:
+    """Render the currently-approved schema document on first visit.
+
+    When the user opens the Schema Agent tab and a schema is already
+    persisted on disk, we previously showed the generic "Start by
+    documenting your database" empty-state with no way to see what was
+    already approved. This helper shows the approved document instead:
+    a status pill, a per-table expander with descriptions and columns,
+    and a collapsed raw-JSON expander for completeness.
+    """
+    store = _get_schema_docs_store()
+    try:
+        entry = store.latest()
+    except Exception:  # noqa: BLE001
+        entry = None
+    if not entry:
+        return
+    version = entry.get("version", "")
+    approved_at = entry.get("approved_at", "")
+    st.markdown(
+        '<span class="status-pill ok">'
+        '<span class="material-symbols-rounded" style="font-size:14px;">check_circle</span>'
+        f"Active schema · v{version}</span>",
+        unsafe_allow_html=True,
+    )
+    if approved_at:
+        st.caption(f"Approved at {approved_at}")
+    st.markdown(
+        "This is the approved schema currently used by the Query Agent. "
+        "Use **Reset schema** above to delete it and generate a new one."
+    )
+
+    schema_ctx = store.extract_query_schema_context(entry)
+    if schema_ctx:
+        st.markdown("#### Tables")
+        for table_name, table_info in schema_ctx.items():
+            cols = table_info.get("columns") or []
+            with st.expander(
+                f"{table_name} · {len(cols)} column{'s' if len(cols) != 1 else ''}",
+                expanded=False,
+            ):
+                desc = (table_info.get("description") or "").strip()
+                if desc:
+                    st.markdown(f"_{desc}_")
+                lines: list[str] = []
+                for col in cols:
+                    cname = col.get("name", "")
+                    cdesc = (col.get("description") or "").strip()
+                    if cdesc:
+                        lines.append(f"- **`{cname}`** — {cdesc}")
+                    else:
+                        lines.append(f"- **`{cname}`**")
+                if lines:
+                    st.markdown("\n".join(lines))
+
+    with st.expander("View raw JSON document", expanded=False):
+        st.json(entry.get("document"))
 
 
 def _render_query_empty_state_blocked() -> None:
@@ -1172,7 +1241,10 @@ def _render_schema_tab(session_id: str) -> None:
     with chat_area:
         st.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
         if is_empty and not is_streaming:
-            _render_schema_empty_state(show_generate_button=show_generate_cta)
+            if has_schema and not st.session_state.schema_pending_hitl:
+                _render_active_schema_summary()
+            else:
+                _render_schema_empty_state(show_generate_button=show_generate_cta)
         else:
             _render_schema_chat_history()
         if is_streaming:

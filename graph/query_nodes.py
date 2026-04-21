@@ -256,6 +256,41 @@ _LANGUAGE_ALIAS: dict[str, str] = {
 }
 
 
+_PREF_KEYWORD_PATTERN = re.compile(
+    r"(?iu)(?:"
+    # Language names and language-setting verbs
+    r"\b(?:idioma|language|lenguaje|english|ingl[ée]s|spanish|espa[nñ]ol|"
+    r"castellano|portugu[ée]s|portuguese|french|franc[ée]s|italian|italiano)\b"
+    # Output format
+    r"|\b(?:formato|format|markdown|plain|plano|json)\b"
+    # Date preferences
+    r"|\b(?:fecha|date|iso|dd/mm|us)\b"
+    # Strictness
+    r"|\b(?:estricto|estricta|strict|lax|relajad[oa]|modo)\b"
+    # Verbs that usually introduce a preference directive
+    r"|\b(?:respond(?:e(?:me)?)?|contest(?:a(?:me)?)?|answer|reply|"
+    r"cambi[aá]|change|update|set|usa|use|prefer(?:ir|encia|ence)?|prefiere)\b"
+    # Time phrases that strongly correlate with preference changes
+    r"|\b(?:siempre|always|from now|de ahora en|a partir de|desde ahora)\b"
+    r")"
+)
+
+
+def _looks_like_prefs_directive(text: str) -> bool:
+    """Cheap pre-filter to decide if a turn is worth asking the LLM about.
+
+    Runs in micro-seconds and, on a miss, lets us skip the preferences
+    LLM call entirely — the common case by far. On a hit we fall through
+    to the LLM which is the only source of truth for whether the turn
+    is actually a preferences directive (vs. a false positive like
+    "cambia de categoria los films" where "cambia" is a verb unrelated
+    to preferences).
+    """
+    if not text or not text.strip():
+        return False
+    return bool(_PREF_KEYWORD_PATTERN.search(text))
+
+
 def _sanitize_pref_updates(raw: Any) -> dict[str, str]:
     """Filter LLM output to keys/values we know how to persist."""
     if not isinstance(raw, dict):
@@ -280,13 +315,18 @@ def _sanitize_pref_updates(raw: Any) -> dict[str, str]:
 def _detect_pref_updates(question: str) -> tuple[dict[str, str], bool, str]:
     """Ask the LLM whether the turn contains a preference directive.
 
-    Always runs (no keyword pre-filter): the LLM is the single source of
-    truth for deciding whether to update preferences. If the LLM is
-    disabled or the call fails, we return ``({}, False, "")`` so the
-    turn proceeds unchanged — better to miss a directive than to persist
-    a wrong one from a brittle heuristic.
+    Starts with a cheap keyword pre-filter (``_looks_like_prefs_directive``)
+    so the common case — a plain data question — costs ~microseconds
+    instead of a full LLM round-trip. Only when a preference-related
+    keyword appears do we delegate to the LLM, which remains the single
+    source of truth for deciding whether to update preferences. If the
+    LLM is disabled or the call fails, we return ``({}, False, "")`` so
+    the turn proceeds unchanged — better to miss a directive than to
+    persist a wrong one from a brittle heuristic.
     """
     if not question.strip() or not settings.llm_api_key.strip():
+        return {}, False, ""
+    if not _looks_like_prefs_directive(question):
         return {}, False, ""
     try:
         model = get_chat_model(temperature=0)
@@ -309,25 +349,28 @@ def _default_prefs_confirmation(updates: dict[str, str]) -> str:
     return "Preferences updated: " + ", ".join(parts) + "."
 
 
-def preferences_update_node(state: QueryAgentState) -> dict[str, Any]:
-    """Detect and persist user directives that update persistent preferences.
+def prefs_finalize_node(state: QueryAgentState) -> dict[str, Any]:
+    """Single preferences node. Runs at the END of the graph, after the
+    user has already received the data answer.
 
-    Runs at the very start of the query graph (before ``prepare``) so the
-    updated prefs are visible to the rest of the pipeline on the same turn.
-    The LLM is called on every turn and is the sole authority on whether
-    anything needs to change; there is no keyword pre-filter.
+    Why at the end: detecting a preferences directive costs an LLM call,
+    and running that call BEFORE the planner would add that latency to
+    every single turn. By deferring to the tail of the graph:
 
-    Behavior:
-    - LLM returns no updates -> pass-through, the flow continues to
-      ``prepare``/``planner`` untouched.
-    - LLM returns updates AND ``pure_command=false`` -> persist the updates,
-      refresh ``persistent_prefs`` in state, continue to ``prepare``.
-    - LLM returns updates AND ``pure_command=true`` -> persist, set
-      ``status="preferences_updated"`` and an ``assistant_text`` in the
-      user's language, and the router sends the flow straight to ``finish``
-      (no SQL generation/execution).
+    - For plain data questions (the 99% case) we only pay a cheap
+      keyword regex (``_looks_like_prefs_directive``) and the LLM is
+      never invoked.
+    - For data questions that also bury a preferences directive
+      (e.g. "dame los top 5 films y desde ahora respondeme en inglés"),
+      the data answer is computed with the OLD prefs and displayed
+      first; the new prefs take effect on the NEXT turn. The user
+      perceives zero added latency on this turn.
+    - For pure-preference commands (e.g. "respondeme siempre en
+      inglés") we still persist the change, and we OVERRIDE the final
+      assistant payload with the confirmation message so the user sees
+      a clean "preferences updated" response instead of whatever the
+      planner returned trying to interpret a non-data question.
     """
-    user_id = str(state.get("user_id") or "default")
     question = str(state.get("question") or "").strip()
     if not question:
         return {}
@@ -336,6 +379,7 @@ def preferences_update_node(state: QueryAgentState) -> dict[str, Any]:
     if not updates and not pure_command:
         return {}
 
+    user_id = str(state.get("user_id") or "default")
     if updates:
         try:
             PersistentStore().merge_preferences(user_id, updates)
@@ -389,6 +433,7 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
     plan_feedback = str(state.get("plan_feedback") or "").strip()
     plan_feedback_source = str(state.get("plan_feedback_source") or "").strip()
     previous_sql = str(state.get("sql_candidate") or "").strip()
+    previous_plan = str(state.get("logical_plan") or "").strip()
     feedback_block = ""
     if plan_feedback:
         header = (
@@ -396,8 +441,12 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
             if plan_feedback_source == "critic"
             else "Previous execution error"
         )
+        plan_line = (
+            f"Previous logical plan: {previous_plan}\n" if previous_plan else ""
+        )
         feedback_block = (
             f"\n{header} (the SQL below was rejected or failed; fix it and do NOT repeat the same mistake):\n"
+            f"{plan_line}"
             f"Previous SQL: {previous_sql or '(none)'}\n"
             f"Feedback: {plan_feedback}\n"
         )
@@ -428,14 +477,20 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
     raw = model.invoke(prompt).content
     parsed = _parse_json_object(raw) or {}
     candidate_tables = _string_list(parsed.get("candidate_tables"), fallback["candidate_tables"])
+    minimum_viable_schema = _string_list(
+        parsed.get("minimum_viable_schema"),
+        fallback["minimum_viable_schema"],
+    )
     needs_clarification = bool(parsed.get("needs_clarification", fallback["needs_clarification"]))
     update = {
         "intent": str(parsed.get("intent", fallback["intent"])),
+        "minimum_viable_schema": minimum_viable_schema,
         "candidate_tables": candidate_tables,
         "candidate_columns": _string_list(
             parsed.get("candidate_columns"),
             fallback["candidate_columns"],
         ),
+        "logical_plan": str(parsed.get("logical_plan") or fallback["logical_plan"]).strip(),
         "needs_clarification": needs_clarification,
         "clarification_question": (
             str(parsed.get("clarification_question"))
@@ -472,12 +527,21 @@ def critic_node(state: QueryAgentState) -> dict[str, Any]:
         if memory_block
         else ""
     )
+    logical_plan = str(state.get("logical_plan") or "").strip()
+    minimum_viable_schema = list(state.get("minimum_viable_schema") or [])
+    plan_block = (
+        f"Planner logical plan (validate that the SQL implements every step):\n{logical_plan}\n"
+        f"Planner minimum viable schema: {minimum_viable_schema}\n\n"
+        if logical_plan or minimum_viable_schema
+        else ""
+    )
     prompt = (
         f"{QUERY_CRITIC_SYSTEM_PROMPT}\n\n"
         f"Target database engine: {settings.sql_dialect}. "
         f"Validate the SQL against this engine's dialect and functions.\n\n"
         f"{mem}"
         f"User question: {question}\n"
+        f"{plan_block}"
         f"Schema context: {json.dumps(schema_context, ensure_ascii=False)}\n"
         f"SQL candidate: {sql_candidate}"
     )
@@ -611,8 +675,10 @@ def _heuristic_plan_and_sql(question: str, schema_context: dict[str, dict[str, A
         available = ", ".join(sorted(_table_names(schema_context))[:5])
         return {
             "intent": intent,
+            "minimum_viable_schema": [],
             "candidate_tables": [],
             "candidate_columns": [],
+            "logical_plan": "",
             "needs_clarification": True,
             "clarification_question": (
                 "I could not identify target tables. "
@@ -624,8 +690,10 @@ def _heuristic_plan_and_sql(question: str, schema_context: dict[str, dict[str, A
     if len(candidate_tables) > 1 and len(scores) > 1 and scores[0][1] == scores[1][1]:
         return {
             "intent": intent,
+            "minimum_viable_schema": list(candidate_tables),
             "candidate_tables": candidate_tables,
             "candidate_columns": list(dict.fromkeys(matched_columns)),
+            "logical_plan": "",
             "needs_clarification": True,
             "clarification_question": (
                 f"Your query could refer to {candidate_tables[0]} or {candidate_tables[1]}. "
@@ -637,14 +705,19 @@ def _heuristic_plan_and_sql(question: str, schema_context: dict[str, dict[str, A
     table = candidate_tables[0]
     if intent == "aggregation":
         sql = f"SELECT COUNT(*) AS total FROM {table};"
+        plan = f"1. Count all rows in `{table}` with COUNT(*)."
     elif "order by" in q or "orden" in q:
         sql = f"SELECT * FROM {table} ORDER BY 1 DESC LIMIT 20;"
+        plan = f"1. Read `{table}`. 2. Order by the first column DESC. 3. Limit 20."
     else:
         sql = f"SELECT * FROM {table} LIMIT 20;"
+        plan = f"1. Read the first 20 rows of `{table}`."
     return {
         "intent": intent,
+        "minimum_viable_schema": [table],
         "candidate_tables": [table],
         "candidate_columns": list(dict.fromkeys(matched_columns)),
+        "logical_plan": plan,
         "needs_clarification": False,
         "clarification_question": None,
         "sql_candidate": sql,
