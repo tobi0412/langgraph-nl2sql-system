@@ -91,9 +91,17 @@ def _state_to_response(
     session_id: str,
     user_id: str,
 ) -> dict[str, Any]:
-    sql_final = state.get("sql_candidate") or None
+    status = state.get("status", "needs_clarification")
+    # Only surface SQL when the turn produced an actionable query. A
+    # clarification (or out-of-scope / missing-schema) turn must NOT ship
+    # a half-baked SQL draft to the UI: the user hasn't committed yet to
+    # the interpretation, so showing SQL would be misleading.
+    if status in {"needs_clarification", "out_of_scope", "blocked_missing_schema"}:
+        sql_final: str | None = None
+    else:
+        sql_final = state.get("sql_candidate") or None
     return {
-        "status": state.get("status", "needs_clarification"),
+        "status": status,
         "session_id": session_id,
         "user_id": user_id,
         "question": question,

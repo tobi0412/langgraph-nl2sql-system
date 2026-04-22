@@ -572,7 +572,11 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
             if parsed.get("clarification_question")
             else fallback["clarification_question"]
         ),
-        "sql_candidate": _extract_sql(parsed.get("sql")) or _extract_sql(raw) or fallback["sql_candidate"],
+        "sql_candidate": (
+            ""
+            if needs_clarification
+            else (_extract_sql(parsed.get("sql")) or _extract_sql(raw) or fallback["sql_candidate"])
+        ),
         "status": "needs_clarification" if needs_clarification or not candidate_tables else "planned",
         "explanation": "",
         "limitations": [],
@@ -697,21 +701,32 @@ def execute_query_node(state: QueryAgentState) -> dict[str, Any]:
 def finalize_query_node(state: QueryAgentState) -> dict[str, Any]:
     """Ensure response consistency for non-executed paths."""
     session_id = str(state.get("session_id") or "default")
+    status = state.get("status")
+    validator = state.get("validator") or {}
+    # Don't persist a draft SQL in session memory for turns that ended on
+    # clarification / out-of-scope / blocked — the user never committed to
+    # that interpretation, so carrying it forward would poison later turns.
+    will_ask_clarification = status == "needs_clarification" or bool(
+        validator and (not validator.get("approved") or validator.get("needs_clarification"))
+    )
+    sql_for_memory = (
+        None
+        if will_ask_clarification or status in {"out_of_scope", "blocked_missing_schema"}
+        else state.get("sql_candidate")
+    )
     SessionStore().record_turn(
         session_id,
         question=str(state.get("question") or ""),
-        sql_candidate=state.get("sql_candidate"),
-        status=str(state.get("status") or ""),
+        sql_candidate=sql_for_memory,
+        status=str(status or ""),
         clarification_question=state.get("clarification_question"),
         candidate_tables=list(state.get("candidate_tables") or []),
         intent=str(state.get("intent")) if state.get("intent") else None,
         assistant_summary=_assistant_turn_summary(state),
     )
 
-    status = state.get("status")
     if status == "ok" or status == "blocked_missing_schema":
         return {}
-    validator = state.get("validator") or {}
     if status == "needs_clarification":
         return {}
     if validator and (not validator.get("approved") or validator.get("needs_clarification")):
@@ -721,6 +736,9 @@ def finalize_query_node(state: QueryAgentState) -> dict[str, Any]:
             "explanation": "",
             "limitations": [],
             "clarification_question": validator.get("clarification_question") or "",
+            # Drop the rejected draft so it is never surfaced alongside a
+            # clarification question, neither in the UI nor in memory.
+            "sql_candidate": "",
         }
         return update
     return {}
