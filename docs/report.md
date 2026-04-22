@@ -84,5 +84,3 @@ To avoid paying that cost on every turn, the node runs at the **end** of the gra
 | MCP tools as a separate HTTP service | Isolated credentials, traceable calls | Extra service and network hop |
 | Structured planner output (intent + plan + tables) | Better table selection and join correctness | Larger prompt and more output tokens |
 | LLM-based preference detection | Natural-language directives, handles paraphrases | Extra LLM call and tokens when a directive is present |
-
-All decisions map directly to the rubric in `CONSIGNA.md` (architecture, schema + HITL, query quality, memory, MCP + patterns, code quality). The full flow is exercised end-to-end by `scripts/demo.py` on the required DVD Rental dataset.

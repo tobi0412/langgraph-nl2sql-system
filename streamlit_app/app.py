@@ -738,7 +738,7 @@ def _render_query_assistant(payload: dict[str, Any]) -> None:
             table_rows = [dict(zip(columns, row)) for row in rows]
             st.dataframe(table_rows, use_container_width=True, hide_index=True)
         else:
-            st.caption("No rows to display.")
+            st.caption("The query ran successfully but returned no rows.")
 
 
 # =============================================================================
