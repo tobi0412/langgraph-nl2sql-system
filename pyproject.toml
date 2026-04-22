@@ -44,6 +44,7 @@ packages = [
     "llm",
     "streamlit_app",
     "observability",
+    "evals",
 ]
 
 [tool.pytest.ini_options]

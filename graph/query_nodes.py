@@ -33,6 +33,7 @@ from prompts.query_agent import (
     QUERY_PLANNER_SQL_SYSTEM_PROMPT,
     QUERY_PREFERENCES_UPDATE_SYSTEM_PROMPT,
 )
+from prompts.security import wrap_user_input
 from settings import settings
 from tools.mcp_sql_tool import MCPSQLQueryTool
 from tools.sql_guard import validate_read_only_sql
@@ -65,14 +66,22 @@ def _build_pending_clarification_text(snap: SessionSnapshot, current_question: s
     return "\n".join(parts)
 
 
-def _build_memory_context_text(prefs: dict[str, str], snap: SessionSnapshot) -> str:
+def _build_memory_context_text(prefs: dict[str, Any], snap: SessionSnapshot) -> str:
+    language = str(prefs.get("language") or "es")
+    instructions_raw = prefs.get("instructions") or []
+    instructions: list[str] = [
+        str(item).strip() for item in instructions_raw if isinstance(item, str) and str(item).strip()
+    ]
     lines: list[str] = [
         "Persistent user preferences (internal metadata): "
-        f"language={prefs.get('language', 'es')}; "
-        f"response_format={prefs.get('format', 'markdown')}; "
-        f"date_format={prefs.get('date_preference', 'iso')}; "
-        f"strictness={prefs.get('strictness', 'normal')}."
+        f"language={language}."
     ]
+    if instructions:
+        rendered = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(instructions))
+        lines.append(
+            "Persistent user instructions (apply on every turn unless the current "
+            "question explicitly overrides them):\n" + rendered
+        )
     if snap.working_messages:
         dial: list[str] = []
         for m in snap.working_messages[-5:]:
@@ -231,12 +240,6 @@ def prepare_query_node(state: QueryAgentState) -> dict[str, Any]:
     }
 
 
-_ALLOWED_PREF_VALUES: dict[str, set[str]] = {
-    "format": {"markdown", "plain", "json"},
-    "date_preference": {"iso", "dd/mm/yyyy", "us"},
-    "strictness": {"strict", "normal", "lax"},
-}
-
 _LANGUAGE_ALIAS: dict[str, str] = {
     "english": "en",
     "ingles": "en",
@@ -253,85 +256,117 @@ _LANGUAGE_ALIAS: dict[str, str] = {
     "francés": "fr",
     "italian": "it",
     "italiano": "it",
+    "german": "de",
+    "deutsch": "de",
+    "aleman": "de",
+    "alemán": "de",
 }
 
 
+# Matches any lexical hint that the turn might carry a persistent
+# preference directive. It is intentionally generous because preferences
+# are now free-form, so we can't enumerate every possible phrasing —
+# we mostly look for:
+# - Temporal/persistence markers ("always", "siempre", "de ahora en más", ...)
+# - Directive verbs ("respondeme", "usa", "cambia", ...)
+# - Language names (switching response language is a common directive)
+# On a miss we skip the LLM call entirely (the 99% case). On a hit we
+# let the LLM decide whether the turn is actually a preference update.
 _PREF_KEYWORD_PATTERN = re.compile(
     r"(?iu)(?:"
-    # Language names and language-setting verbs
+    # Language names (short list of major ones)
     r"\b(?:idioma|language|lenguaje|english|ingl[ée]s|spanish|espa[nñ]ol|"
-    r"castellano|portugu[ée]s|portuguese|french|franc[ée]s|italian|italiano)\b"
-    # Output format
-    r"|\b(?:formato|format|markdown|plain|plano|json)\b"
-    # Date preferences
-    r"|\b(?:fecha|date|iso|dd/mm|us)\b"
-    # Strictness
-    r"|\b(?:estricto|estricta|strict|lax|relajad[oa]|modo)\b"
-    # Verbs that usually introduce a preference directive
+    r"castellano|portugu[ée]s|portuguese|french|franc[ée]s|italian|italiano|"
+    r"deutsch|german|alem[áa]n)\b"
+    # Directive verbs that typically introduce a persistent instruction
     r"|\b(?:respond(?:e(?:me)?)?|contest(?:a(?:me)?)?|answer|reply|"
-    r"cambi[aá]|change|update|set|usa|use|prefer(?:ir|encia|ence)?|prefiere)\b"
-    # Time phrases that strongly correlate with preference changes
-    r"|\b(?:siempre|always|from now|de ahora en|a partir de|desde ahora)\b"
+    r"cambi[aá]|change|update|set|usa|use|prefer(?:ir|encia|ence)?|prefiere|"
+    r"evita|evitar|avoid|skip|ignora|ignore|olvida|forget|"
+    r"incluye|include|muestra|show|agrega|add|quita|remove|elimina|delete)\b"
+    # Temporal / persistence markers (strongest signal of "want this every turn")
+    r"|\b(?:siempre|always|never|nunca|from now|de ahora en|a partir de|"
+    r"desde ahora|henceforth|de aqu[ií] en adelante|todas las veces|cada vez)\b"
     r")"
 )
 
 
 def _looks_like_prefs_directive(text: str) -> bool:
-    """Cheap pre-filter to decide if a turn is worth asking the LLM about.
-
-    Runs in micro-seconds and, on a miss, lets us skip the preferences
-    LLM call entirely — the common case by far. On a hit we fall through
-    to the LLM which is the only source of truth for whether the turn
-    is actually a preferences directive (vs. a false positive like
-    "cambia de categoria los films" where "cambia" is a verb unrelated
-    to preferences).
-    """
+    """Cheap pre-filter to decide if a turn is worth asking the LLM about."""
     if not text or not text.strip():
         return False
     return bool(_PREF_KEYWORD_PATTERN.search(text))
 
 
-def _sanitize_pref_updates(raw: Any) -> dict[str, str]:
-    """Filter LLM output to keys/values we know how to persist."""
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key, val in raw.items():
-        if not isinstance(key, str) or not isinstance(val, str):
+def _clean_instruction_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
             continue
-        val_norm = val.strip().lower()
-        if not val_norm:
+        s = " ".join(item.split())
+        if not s:
             continue
-        if key == "language":
-            mapped = _LANGUAGE_ALIAS.get(val_norm, val_norm)
-            if re.fullmatch(r"[a-z]{2,5}", mapped):
-                out["language"] = mapped
-        elif key in _ALLOWED_PREF_VALUES:
-            if val_norm in _ALLOWED_PREF_VALUES[key]:
-                out[key] = val_norm
+        out.append(s[:200])
     return out
 
 
-def _detect_pref_updates(question: str) -> tuple[dict[str, str], bool, str]:
-    """Ask the LLM whether the turn contains a preference directive.
+def _sanitize_pref_updates(raw: Any) -> dict[str, Any]:
+    """Coerce the LLM's ``updates`` object into the shape expected by
+    :meth:`PersistentStore.update_preferences`.
 
-    Starts with a cheap keyword pre-filter (``_looks_like_prefs_directive``)
-    so the common case — a plain data question — costs ~microseconds
-    instead of a full LLM round-trip. Only when a preference-related
-    keyword appears do we delegate to the LLM, which remains the single
-    source of truth for deciding whether to update preferences. If the
-    LLM is disabled or the call fails, we return ``({}, False, "")`` so
-    the turn proceeds unchanged — better to miss a directive than to
-    persist a wrong one from a brittle heuristic.
+    Recognised keys: ``language``, ``add_instructions``,
+    ``remove_instructions``. Everything else is ignored. Empty lists and
+    invalid values are dropped so callers can check for "real" updates
+    with a simple truthiness test.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    lang = raw.get("language")
+    if isinstance(lang, str):
+        lang_norm = lang.strip().lower()
+        mapped = _LANGUAGE_ALIAS.get(lang_norm, lang_norm)
+        if re.fullmatch(r"[a-z]{2,5}", mapped):
+            out["language"] = mapped
+    add = _clean_instruction_list(raw.get("add_instructions"))
+    if add:
+        out["add_instructions"] = add
+    remove = _clean_instruction_list(raw.get("remove_instructions"))
+    if remove:
+        out["remove_instructions"] = remove
+    return out
+
+
+def _detect_pref_updates(
+    question: str, current_prefs: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], bool, str]:
+    """Ask the LLM whether the turn carries a persistent-preference directive.
+
+    Falls back to the pre-filter-only short-circuit when the LLM is
+    disabled or the call raises, so a brittle detection never blocks or
+    mangles the main query turn. The current preferences are inlined in
+    the prompt so the LLM can decide what to replace when the list is
+    at capacity.
     """
     if not question.strip() or not settings.llm_api_key.strip():
         return {}, False, ""
     if not _looks_like_prefs_directive(question):
         return {}, False, ""
+    current = current_prefs or {}
+    prefs_snapshot = {
+        "language": str(current.get("language") or "es"),
+        "instructions": [
+            str(item) for item in (current.get("instructions") or []) if isinstance(item, str)
+        ],
+    }
     try:
         model = get_chat_model(temperature=0)
         prompt = (
-            f"{QUERY_PREFERENCES_UPDATE_SYSTEM_PROMPT}\n\nUser question: {question}"
+            f"{QUERY_PREFERENCES_UPDATE_SYSTEM_PROMPT}\n\n"
+            f"Current preferences (JSON): "
+            f"{json.dumps(prefs_snapshot, ensure_ascii=False)}\n\n"
+            f"User question:\n{wrap_user_input(question)}"
         )
         parsed = _parse_json_object(model.invoke(prompt).content) or {}
     except Exception:  # noqa: BLE001 - prefs detection is optional, never fatal
@@ -342,10 +377,21 @@ def _detect_pref_updates(question: str) -> tuple[dict[str, str], bool, str]:
     return updates, pure_command, confirmation
 
 
-def _default_prefs_confirmation(updates: dict[str, str]) -> str:
+def _default_prefs_confirmation(updates: dict[str, Any]) -> str:
+    """Fallback confirmation used when the LLM omits a ``confirmation`` text."""
     if not updates:
         return ""
-    parts = [f"{k}={v}" for k, v in updates.items()]
+    parts: list[str] = []
+    if updates.get("language"):
+        parts.append(f"language={updates['language']}")
+    added = updates.get("add_instructions") or []
+    if added:
+        parts.append(f"+{len(added)} instruction(s)")
+    removed = updates.get("remove_instructions") or []
+    if removed:
+        parts.append(f"-{len(removed)} instruction(s)")
+    if not parts:
+        return ""
     return "Preferences updated: " + ", ".join(parts) + "."
 
 
@@ -375,20 +421,26 @@ def prefs_finalize_node(state: QueryAgentState) -> dict[str, Any]:
     if not question:
         return {}
 
-    updates, pure_command, confirmation = _detect_pref_updates(question)
+    current_prefs = state.get("persistent_prefs") or {}
+    updates, pure_command, confirmation = _detect_pref_updates(question, current_prefs)
     if not updates and not pure_command:
         return {}
 
     user_id = str(state.get("user_id") or "default")
     if updates:
         try:
-            PersistentStore().merge_preferences(user_id, updates)
+            PersistentStore().update_preferences(
+                user_id,
+                language=updates.get("language"),
+                add_instructions=updates.get("add_instructions"),
+                remove_instructions=updates.get("remove_instructions"),
+            )
         except Exception:  # noqa: BLE001 - don't break the turn if the store is down
             pass
     try:
         refreshed = PersistentStore().get_preferences(user_id)
     except Exception:  # noqa: BLE001
-        refreshed = dict(state.get("persistent_prefs") or {})
+        refreshed = dict(current_prefs)
 
     if pure_command:
         return {
@@ -468,7 +520,8 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
         f"{QUERY_PLANNER_SQL_SYSTEM_PROMPT}\n\n"
         f"Target database engine: {settings.sql_dialect}. "
         f"Generate SQL that is syntactically valid for this engine.\n\n"
-        f"Question (with memory context when present): {planning_input}\n"
+        f"Question (with memory context when present):\n"
+        f"{wrap_user_input(planning_input)}\n"
         f"{style_block}"
         f"{pending_block}"
         f"{feedback_block}"
@@ -540,7 +593,7 @@ def critic_node(state: QueryAgentState) -> dict[str, Any]:
         f"Target database engine: {settings.sql_dialect}. "
         f"Validate the SQL against this engine's dialect and functions.\n\n"
         f"{mem}"
-        f"User question: {question}\n"
+        f"User question:\n{wrap_user_input(question)}\n"
         f"{plan_block}"
         f"Schema context: {json.dumps(schema_context, ensure_ascii=False)}\n"
         f"SQL candidate: {sql_candidate}"

@@ -108,12 +108,6 @@ QUERY_NODE_LABELS: dict[str, dict[str, str]] = {
         "done": "Response ready",
         "icon": "check_circle",
     },
-    "prefs_finalize": {
-        "pending": "Check preferences directive",
-        "active": "Checking preferences directive...",
-        "done": "Preferences synced",
-        "icon": "tune",
-    },
 }
 
 
@@ -357,8 +351,11 @@ def _render_active_stream_fragment() -> None:
     if not active:
         return
 
-    # Drain the node queue and track which graph nodes have fired so we can
-    # render a live checklist of "done / running / pending" steps.
+    labels: dict[str, dict[str, str]] = active.get("labels") or {}
+
+    # Drain the node queue and track which graph nodes have fired. We only
+    # register nodes that have an entry in `labels` — internal-only nodes
+    # (e.g. `prefs_finalize`) are intentionally hidden from the UI.
     order: list[str] = active.setdefault("order", [])
     node_state: dict[str, int] = active.setdefault("node_state", {})
     while True:
@@ -366,27 +363,36 @@ def _render_active_stream_fragment() -> None:
             evt = active["queue"].get_nowait()
         except Empty:
             break
-        if not isinstance(evt, dict):
+        if not isinstance(evt, dict) or evt.get("kind") != "node":
             continue
-        if evt.get("kind") == "node":
-            node_name = str(evt.get("name") or "").strip()
-            if node_name and node_name != "__interrupt__":
-                order.append(node_name)
-                node_state[node_name] = node_state.get(node_name, 0) + 1
+        node_name = str(evt.get("name") or "").strip()
+        if not node_name or node_name == "__interrupt__":
+            continue
+        if node_name not in labels:
+            continue
+        order.append(node_name)
+        node_state[node_name] = node_state.get(node_name, 0) + 1
 
     done = active["done"].is_set()
     shared = active["shared"]
     cancelled = done and shared["cancelled"]
     error = shared["error"] if done else None
     stopping = bool(active.get("stopping"))
-    labels: dict[str, dict[str, str]] = active.get("labels") or {}
 
-    completed: set[str] = set(order)
+    # Dedupe the fired nodes preserving first-seen order. Each node shows
+    # once; retries are surfaced as an `(×N)` suffix on the done line.
+    seen: set[str] = set()
+    fired_in_order: list[str] = []
+    for n in order:
+        if n not in seen:
+            fired_in_order.append(n)
+            seen.add(n)
+
+    # LangGraph emits an event when a node finishes, so the "currently
+    # running" step is the first label that hasn't shown up in `order` yet.
     label_order = list(labels.keys())
-    # LangGraph emits an event when a node finishes, so the "currently running"
-    # step is the first label that hasn't shown up in `order` yet.
     current_node: str | None = next(
-        (n for n in label_order if n not in completed),
+        (n for n in label_order if n not in seen),
         None,
     )
 
@@ -405,22 +411,28 @@ def _render_active_stream_fragment() -> None:
         outer_label, outer_state = active["title"], "running"
 
     with st.status(outer_label, state=outer_state, expanded=True):
-        for n in label_order:
+        for n in fired_in_order:
             meta = labels.get(n) or {}
-            if n in completed:
-                count = node_state.get(n, 1)
-                suffix = f" (×{count})" if count > 1 else ""
-                st.markdown(
-                    f":material/check_circle: {meta.get('done', n)}{suffix}"
-                )
-            elif not done and n == current_node:
-                st.markdown(
-                    f":material/progress_activity: **{meta.get('active', n)}**"
-                )
-            else:
-                st.markdown(
-                    f":material/radio_button_unchecked: {meta.get('pending', n)}"
-                )
+            count = node_state.get(n, 1)
+            suffix = f" (×{count})" if count > 1 else ""
+            done_label = str(meta.get("done", n)) + suffix
+            st.markdown(
+                '<div class="thinking-step done">'
+                '<span class="step-icon">check_circle</span>'
+                f'<span>{done_label}</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        if not done and current_node:
+            meta = labels.get(current_node) or {}
+            active_label = str(meta.get("active", current_node))
+            st.markdown(
+                '<div class="thinking-step active">'
+                '<span class="thinking-spinner"></span>'
+                f'<span>{active_label}</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
     if not done:
         return

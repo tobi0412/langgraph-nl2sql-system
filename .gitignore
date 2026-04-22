@@ -227,8 +227,8 @@ data/schema_docs.json
 .vscode/
 
 # Artefactos de demos de referencia
-demos-estudiantes-main/
 demos-estudiantes-main/**/__pycache__/
 demos-estudiantes-main/**/*.pyc
+demos-estudiantes-main/
 
 *.md

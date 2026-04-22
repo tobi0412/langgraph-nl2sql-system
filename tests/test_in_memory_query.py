@@ -42,12 +42,19 @@ def test_in_followup_planner_sees_prior_sql(memory_paths):
 
 
 def test_in_new_session_keeps_persistent_prefs(memory_paths):
-    PersistentStore().merge_preferences("bob", {"language": "en", "format": "plain"})
+    PersistentStore().update_preferences(
+        "bob",
+        language="en",
+        add_instructions=["Use markdown tables for tabular results."],
+    )
     p = PersistentStore().get_preferences("bob")
     empty_snap = SessionSnapshot()
     t1 = _build_memory_context_text(p, empty_snap)
     t2 = _build_memory_context_text(p, empty_snap)
-    assert "idioma=en" in t1.replace(" ", "")
+    # Language should be present in the memory context block.
+    assert "language=en" in t1.replace(" ", "")
+    # Free-form instruction should also be surfaced so the planner sees it.
+    assert "Use markdown tables for tabular results." in t1
     assert t1 == t2
 
     SessionStore().record_turn(

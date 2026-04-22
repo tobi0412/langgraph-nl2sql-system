@@ -13,7 +13,7 @@ class QueryAgentState(TypedDict, total=False):
     question: str
     schema_context: dict[str, dict[str, Any]]
 
-    persistent_prefs: dict[str, str]
+    persistent_prefs: dict[str, Any]
     memory_context_text: str
     response_style_instruction: str | None
     pending_clarification_text: str
