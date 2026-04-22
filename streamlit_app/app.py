@@ -673,6 +673,13 @@ def _render_query_assistant(payload: dict[str, Any]) -> None:
             "Needs clarification</span>",
             unsafe_allow_html=True,
         )
+    elif status == "out_of_scope":
+        st.markdown(
+            '<span class="status-pill info">'
+            '<span class="material-symbols-rounded" style="font-size:14px;">info</span>'
+            "Out of scope</span>",
+            unsafe_allow_html=True,
+        )
     elif status == "execution_error":
         st.markdown(
             '<span class="status-pill blocked">'
@@ -699,6 +706,9 @@ def _render_query_assistant(payload: dict[str, Any]) -> None:
 
     if status in ("ok", "preferences_updated"):
         # Direct LLM reply only; no auto-generated debug line, no clarification echo.
+        if assistant_text:
+            st.markdown(assistant_text)
+    elif status == "out_of_scope":
         if assistant_text:
             st.markdown(assistant_text)
     elif status == "needs_clarification":

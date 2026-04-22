@@ -529,14 +529,36 @@ def planner_node(state: QueryAgentState) -> dict[str, Any]:
     )
     raw = model.invoke(prompt).content
     parsed = _parse_json_object(raw) or {}
+    intent_raw = str(parsed.get("intent", fallback["intent"]) or "").strip()
+    out_of_scope = intent_raw.lower() == "out_of_scope"
     candidate_tables = _string_list(parsed.get("candidate_tables"), fallback["candidate_tables"])
     minimum_viable_schema = _string_list(
         parsed.get("minimum_viable_schema"),
         fallback["minimum_viable_schema"],
     )
     needs_clarification = bool(parsed.get("needs_clarification", fallback["needs_clarification"]))
+    if out_of_scope:
+        return {
+            "intent": "out_of_scope",
+            "minimum_viable_schema": [],
+            "candidate_tables": [],
+            "candidate_columns": [],
+            "logical_plan": "",
+            "needs_clarification": False,
+            "clarification_question": "",
+            "sql_candidate": "",
+            "status": "out_of_scope",
+            "explanation": "",
+            "limitations": [],
+            "sample": None,
+            "validator": {},
+            "assistant_text": str(parsed.get("assistant_text") or "").strip(),
+            "plan_feedback": None,
+            "plan_feedback_source": None,
+            "plan_retry_count": retry_count_carry,
+        }
     update = {
-        "intent": str(parsed.get("intent", fallback["intent"])),
+        "intent": intent_raw or str(fallback["intent"]),
         "minimum_viable_schema": minimum_viable_schema,
         "candidate_tables": candidate_tables,
         "candidate_columns": _string_list(
